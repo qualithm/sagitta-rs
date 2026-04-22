@@ -1,0 +1,60 @@
+# Docker Compose for Sagitta
+#
+# Usage:
+#   docker compose up -d         # Build and start Sagitta
+#   docker compose logs -f       # View logs
+#   docker compose down          # Stop and remove
+#
+# For development with local binary (requires Linux or cross-compilation):
+#   cargo build --release --target x86_64-unknown-linux-gnu
+#   docker compose -f docker-compose.dev.yml up -d
+
+name: sagitta
+
+services:
+  sagitta:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: qualithm/sagitta:latest
+    container_name: sagitta
+    ports:
+      - "50051:50051"
+    environment:
+      - RUST_LOG=info
+    # volumes:
+      # Optional: Mount custom configuration
+      # - ./config/sagitta.toml:/etc/sagitta/config.toml:ro
+      # Optional: Mount TLS certificates
+      # - ./certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # Optional: TLS-enabled instance
+  # Uncomment to use with certificates
+  #
+    # sagitta-tls:
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile
+  #   image: qualithm/sagitta:latest
+  #   container_name: sagitta-tls
+  #   ports:
+  #     - "50052:50051"
+  #   environment:
+  #     - RUST_LOG=info
+  #     - SAGITTA_CONFIG=/etc/sagitta/config.toml
+  #   volumes:
+  #     - ./config-tls/sagitta.toml:/etc/sagitta/config.toml:ro
+  #     - ./certs:/certs:ro
+  #   healthcheck:
+  #     test: ["CMD", "nc", "-z", "localhost", "50051"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
+  #   restart: unless-stopped

@@ -1,0 +1,59 @@
+[package]
+name = "sagitta"
+version.workspace = true
+edition.workspace = true
+description = "Rust framework for building analytical data services on Arrow Flight and DataFusion."
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sagitta"
+path = "src/main.rs"
+
+[dependencies]
+# Arrow Flight
+arrow-array = "57"
+arrow-flight = { version = "57", features = ["flight-sql-experimental"] }
+arrow-ipc = "57"
+arrow-schema = "57"
+
+# gRPC / Async
+tonic = { version = "0.14", features = ["transport", "tls-ring"] }
+tokio.workspace = true
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialisation
+prost = "0.14"
+bytes = "1"
+
+# Configuration
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Query engine
+datafusion.workspace = true
+
+# TLS / Certificate parsing
+x509-parser = "0.17"
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# Certificate generation for tests
+rcgen = "0.14"
+criterion = { workspace = true }
+rand = "0.8"
+
+[[bench]]
+name = "sagitta_bench"
+harness = false

@@ -1,0 +1,18 @@
+[build]
+# Use all CPU cores
+jobs = 8
+
+[profile.dev]
+# Faster incremental builds
+incremental = true
+# Skip debug info for dependencies (huge speedup)
+debug = 0
+
+[profile.dev.package."*"]
+# Optimize dependencies even in dev (better runtime, similar compile time)
+opt-level = 2
+debug = false
+
+[profile.bench]
+# Faster bench compilation
+incremental = true

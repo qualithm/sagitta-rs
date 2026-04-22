@@ -1,0 +1,36 @@
+# Multi-arch release Dockerfile
+# Expects pre-built binaries in binaries/linux/{amd64,arm64}/
+
+FROM debian:trixie-slim
+
+ARG TARGETARCH
+
+# Binary name passed from CI workflow
+ARG BINARY_NAME=sagitta
+ENV BINARY_NAME=${BINARY_NAME}
+
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the pre-built binary for the target architecture
+COPY binaries/linux/${TARGETARCH}/${BINARY_NAME} /usr/local/bin/${BINARY_NAME}
+RUN chmod +x /usr/local/bin/${BINARY_NAME}
+
+# Create non-root user
+RUN useradd --create-home --user-group app
+USER app
+
+# Default configuration directory
+ENV SAGITTA_CONFIG=/etc/sagitta/config.toml
+
+# Expose Flight gRPC port
+EXPOSE 50051
+
+# Healthcheck using netcat
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
+    CMD nc -z localhost 50051
+
+ENTRYPOINT ["sh", "-c", "exec \"/usr/local/bin/$BINARY_NAME\" \"$@\"", "--"]

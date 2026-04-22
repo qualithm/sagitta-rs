@@ -1,0 +1,34 @@
+# Sagitta Configuration
+#
+# Copy this file to sagitta.toml and adjust settings as needed.
+
+# Server listen address
+listen_addr = "0.0.0.0:50051"
+
+# Logging configuration
+[logging]
+# Log level: "trace", "debug", "info", "warn", "error"
+# Can also be set via RUST_LOG environment variable
+level = "info"
+# Log format: "pretty" (human-readable) or "json" (structured)
+format = "pretty"
+
+# Server configuration
+[server]
+# Graceful shutdown timeout in seconds
+shutdown_timeout_secs = 30
+# TCP keepalive interval in seconds (0 to disable)
+tcp_keepalive_secs = 60
+# Maximum concurrent connections (0 for unlimited)
+max_connections = 0
+
+# TLS configuration (optional)
+# Uncomment to enable TLS
+#
+# [tls]
+# cert_path = "certs/server.crt"
+# key_path = "certs/server.key"
+#
+# # Optional: CA certificate for mTLS (client certificate validation)
+# # ca_path = "certs/ca.crt"
+# # client_auth_optional = false

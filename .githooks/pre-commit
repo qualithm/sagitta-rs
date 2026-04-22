@@ -1,0 +1,31 @@
+#!/bin/sh
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Format
+echo "→ Running cargo fmt..."
+cargo fmt --all -- --check
+
+# Check
+echo "→ Running cargo check..."
+cargo check --workspace --all-targets
+
+# Clippy
+echo "→ Running cargo clippy..."
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Tests
+echo "→ Running cargo test..."
+cargo test --workspace
+
+# Deny (dependency audit)
+if command -v cargo-deny > /dev/null 2>&1; then
+  echo "→ Running cargo deny..."
+  cargo deny check
+else
+  echo "⚠ cargo-deny not installed, skipping dependency audit"
+fi
+
+echo "✓ All pre-commit checks passed!"

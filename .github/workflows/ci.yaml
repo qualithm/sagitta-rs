@@ -1,0 +1,230 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, test ]
+    paths-ignore:
+      - ".githooks/**"
+      - ".vscode/**"
+      - "**/*.md"
+      - "docker/**"
+      - "justfile"
+      - "scripts/**"
+      - "LICENSE"
+  pull_request:
+    branches: [ main, test ]
+    paths-ignore:
+      - ".githooks/**"
+      - ".vscode/**"
+      - "**/*.md"
+      - "docker/**"
+      - "justfile"
+      - "scripts/**"
+      - "LICENSE"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "build"
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --workspace --all-targets
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "build"
+      - name: Test
+        run: cargo test --workspace
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "build"
+      - name: Doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-Dwarnings"
+
+  deny:
+    name: Dependency Audit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  udeps:
+    name: Unused Dependencies
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "udeps"
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked
+      - name: Check unused dependencies
+        run: cargo +nightly udeps --workspace
+
+  benchmarks:
+    name: Benchmark Check
+    runs-on: ubuntu-24.04
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "build"
+      - name: Install just
+        uses: extractions/setup-just@v2
+      - name: Download baseline
+        uses: actions/cache@v4
+        with:
+          path: target/criterion
+          key: benchmark-baseline-${{ runner.os }}
+          restore-keys: |
+            benchmark-baseline-${{ runner.os }}
+      - name: Run benchmarks and save baseline
+        run: |
+          # Run only criterion benchmarks (--bench '*' avoids lib test binary)
+          cargo bench --workspace --bench '*' -- --save-baseline main
+      - name: Save baseline for future runs
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion
+          key: benchmark-baseline-${{ runner.os }}-${{ github.sha }}
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v6
+        with:
+          name: benchmark-results
+          path: |
+            target/criterion
+            benchmarks/report-*.md
+          retention-days: 30
+
+  benchmark-regression:
+    name: Benchmark Regression Check
+    runs-on: ubuntu-24.04
+    needs: build
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "build"
+      - name: Restore baseline from main
+        uses: actions/cache/restore@v4
+        with:
+          path: target/criterion
+          key: benchmark-baseline-${{ runner.os }}
+          restore-keys: |
+            benchmark-baseline-${{ runner.os }}
+      - name: Run benchmarks and compare against baseline
+        run: |
+          # Run only criterion benchmarks against main baseline
+          cargo bench --workspace --bench '*' -- --baseline main 2>&1 | tee benchmark-comparison.txt
+
+          # Check for significant regressions (>10% slower)
+          if grep -E "Performance has regressed" benchmark-comparison.txt; then
+            echo "::warning::Performance regression detected - review benchmark results"
+          fi
+      - name: Upload comparison results
+        uses: actions/upload-artifact@v6
+        with:
+          name: benchmark-comparison
+          path: benchmark-comparison.txt
+          retention-days: 14
