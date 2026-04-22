@@ -18,8 +18,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
-  # TODO: Update this to your binary name
-  BINARY_NAME: example
+  BINARY_NAME: sagitta
 
 jobs:
   build-binaries:
