@@ -2,10 +2,11 @@
 name = "sagitta"
 version.workspace = true
 edition.workspace = true
-description = "Rust framework for building analytical data services on Arrow Flight and DataFusion."
+description.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
 
 [package.metadata.docs.rs]
 targets = [
