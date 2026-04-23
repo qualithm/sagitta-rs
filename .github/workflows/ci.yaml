@@ -1,16 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [ main, test ]
-    paths-ignore:
-      - ".githooks/**"
-      - ".vscode/**"
-      - "**/*.md"
-      - "docker/**"
-      - "justfile"
-      - "scripts/**"
-      - "LICENSE"
   pull_request:
     branches: [ main, test ]
     paths-ignore:
@@ -85,6 +75,45 @@ jobs:
           shared-key: "build"
       - name: Test
         run: cargo test --workspace
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "build"
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage report
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-report
+          path: lcov.info
+          retention-days: 14
 
   doc:
     name: Documentation
@@ -161,7 +190,7 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v2
       - name: Download baseline
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: target/criterion
           key: benchmark-baseline-${{ runner.os }}
@@ -172,7 +201,7 @@ jobs:
           # Run only criterion benchmarks (--bench '*' avoids lib test binary)
           cargo bench --workspace --bench '*' -- --save-baseline main
       - name: Save baseline for future runs
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: target/criterion
           key: benchmark-baseline-${{ runner.os }}-${{ github.sha }}
@@ -207,7 +236,7 @@ jobs:
         with:
           shared-key: "build"
       - name: Restore baseline from main
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: target/criterion
           key: benchmark-baseline-${{ runner.os }}
