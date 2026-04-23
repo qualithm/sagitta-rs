@@ -1,16 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [ main, test ]
-    paths-ignore:
-      - ".githooks/**"
-      - ".vscode/**"
-      - "**/*.md"
-      - "docker/**"
-      - "justfile"
-      - "scripts/**"
-      - "LICENSE"
   pull_request:
     branches: [ main, test ]
     paths-ignore:
