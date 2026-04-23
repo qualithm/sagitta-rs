@@ -1,9 +1,7 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: [ CI ]
-    types: [ completed ]
+  push:
     branches: [ main ]
   workflow_dispatch: {}
 
@@ -24,17 +22,15 @@ jobs:
   build-binaries:
     name: Build Binary (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    if: ${{ github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success' }}
     strategy:
       matrix:
         include:
-          # Use ubuntu-22.04 (GLIBC 2.35) for compatibility with debian:bookworm-slim (GLIBC 2.36)
+          # Use ubuntu-24.04 (GLIBC 2.39) for compatibility with debian:trixie-slim (GLIBC 2.41)
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             artifact: linux-amd64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             artifact: linux-arm64
     steps:
       - name: Checkout
@@ -72,7 +68,7 @@ jobs:
 
   docker:
     name: Build Docker Image
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: build-binaries
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
@@ -151,8 +147,6 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success' }}
     environment:
       name: crates-io
     permissions:
@@ -171,7 +165,7 @@ jobs:
           shared-key: "release-publish"
 
       - name: Authenticate with crates.io
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@v1.0.4
         id: auth
 
       - name: Check if version exists on crates.io
