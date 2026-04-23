@@ -161,7 +161,7 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v2
       - name: Download baseline
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: target/criterion
           key: benchmark-baseline-${{ runner.os }}
@@ -172,7 +172,7 @@ jobs:
           # Run only criterion benchmarks (--bench '*' avoids lib test binary)
           cargo bench --workspace --bench '*' -- --save-baseline main
       - name: Save baseline for future runs
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: target/criterion
           key: benchmark-baseline-${{ runner.os }}-${{ github.sha }}
@@ -207,7 +207,7 @@ jobs:
         with:
           shared-key: "build"
       - name: Restore baseline from main
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: target/criterion
           key: benchmark-baseline-${{ runner.os }}
