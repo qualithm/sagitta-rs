@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [ main, test ]
+    branches: [main, test]
     paths-ignore:
       - ".githooks/**"
       - ".vscode/**"
