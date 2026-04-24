@@ -176,13 +176,16 @@ jobs:
           CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "${{ env.BINARY_NAME }}") | .version')
           echo "crate=$CRATE_NAME@$CRATE_VERSION" >> $GITHUB_OUTPUT
 
-          HTTP_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/$CRATE_NAME/$CRATE_VERSION" || true)
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "User-Agent: github-actions/${{ github.repository }}" "https://crates.io/api/v1/crates/$CRATE_NAME/$CRATE_VERSION")
           if [ "$HTTP_STATUS" = "200" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "::notice::$CRATE_NAME@$CRATE_VERSION already published, skipping"
-          else
+          elif [ "$HTTP_STATUS" = "404" ]; then
             echo "exists=false" >> $GITHUB_OUTPUT
             echo "::notice::$CRATE_NAME@$CRATE_VERSION not found, will publish"
+          else
+            echo "::error::Unexpected HTTP status $HTTP_STATUS from crates.io API"
+            exit 1
           fi
 
       - name: Publish to crates.io
