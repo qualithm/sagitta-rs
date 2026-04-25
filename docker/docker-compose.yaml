@@ -23,10 +23,10 @@ services:
     environment:
       - RUST_LOG=info
     # volumes:
-      # Optional: Mount custom configuration
-      # - ./config/sagitta.toml:/etc/sagitta/config.toml:ro
-      # Optional: Mount TLS certificates
-      # - ./certs:/certs:ro
+    # Optional: Mount custom configuration
+    # - ./config/sagitta.toml:/etc/sagitta/config.toml:ro
+    # Optional: Mount TLS certificates
+    # - ./certs:/certs:ro
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "50051"]
       interval: 10s
@@ -38,7 +38,7 @@ services:
   # Optional: TLS-enabled instance
   # Uncomment to use with certificates
   #
-    # sagitta-tls:
+  # sagitta-tls:
   #   build:
   #     context: ..
   #     dockerfile: docker/Dockerfile
