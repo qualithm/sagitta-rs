@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/sagitta"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Rust framework for building analytical data services on Arrow Flight and DataFusion."
 license = "Apache-2.0"
