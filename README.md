@@ -9,11 +9,18 @@ Rust framework for building analytical data services on Arrow Flight and DataFus
 
 ## Features
 
-- **Arrow Flight & Flight SQL** — all RPC methods (Handshake, ListFlights, GetFlightInfo, GetSchema, DoGet, DoPut, DoExchange, DoAction, ListActions, PollFlightInfo) plus full Flight SQL command support
-- **SQL via DataFusion** — DDL (CREATE/DROP/ALTER TABLE, CREATE/DROP VIEW, CREATE/DROP SCHEMA), DML (INSERT, UPDATE, DELETE, MERGE), queries (joins, subqueries, CTEs, window functions, aggregates), transactions, savepoints, and prepared statements
-- **Pluggable storage** — implement the `Store` trait for custom backends; ships with an in-memory store
-- **Pluggable authentication** — implement `UserStore` for custom identity providers; ships with basic auth, bearer tokens, and mTLS
-- **Custom actions** — extend `DoAction`/`ListActions` with application-specific handlers via the `CustomAction` trait
+- **Arrow Flight & Flight SQL** — all RPC methods (Handshake, ListFlights, GetFlightInfo, GetSchema,
+  DoGet, DoPut, DoExchange, DoAction, ListActions, PollFlightInfo) plus full Flight SQL command
+  support
+- **SQL via DataFusion** — DDL (CREATE/DROP/ALTER TABLE, CREATE/DROP VIEW, CREATE/DROP SCHEMA), DML
+  (INSERT, UPDATE, DELETE, MERGE), queries (joins, subqueries, CTEs, window functions, aggregates),
+  transactions, savepoints, and prepared statements
+- **Pluggable storage** — implement the `Store` trait for custom backends; ships with an in-memory
+  store
+- **Pluggable authentication** — implement `UserStore` for custom identity providers; ships with
+  basic auth, bearer tokens, and mTLS
+- **Custom actions** — extend `DoAction`/`ListActions` with application-specific handlers via the
+  `CustomAction` trait
 - **TLS & mTLS** — optional transport security with configurable client certificate requirements
 - **Configuration** — TOML files with environment variable override (`SAGITTA_CONFIG`)
 - **Observability** — structured logging via `tracing`, health checks, graceful shutdown
@@ -97,7 +104,8 @@ See [sagitta.example.toml](sagitta.example.toml) for all options:
 
 ### Error Handling
 
-Sagitta surfaces errors via `anyhow::Result` at the server level. Storage and auth errors implement `std::error::Error` and are propagated through the Flight RPC status codes.
+Sagitta surfaces errors via `anyhow::Result` at the server level. Storage and auth errors implement
+`std::error::Error` and are propagated through the Flight RPC status codes.
 
 ## API Reference
 
