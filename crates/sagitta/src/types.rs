@@ -24,6 +24,23 @@ impl DataPath {
     pub fn display(&self) -> String {
         self.0.join("/")
     }
+
+    /// Convert to a URI by appending the path to `base`.
+    ///
+    /// A `/` separator is inserted between `base` and the path segments if
+    /// `base` does not already end with one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use sagitta::DataPath;
+    /// let path = DataPath::from(vec!["schema", "table"]);
+    /// assert_eq!(path.to_uri("file:///data"), "file:///data/schema/table");
+    /// ```
+    pub fn to_uri(&self, base: &str) -> String {
+        let base = base.trim_end_matches('/');
+        format!("{}/{}", base, self.0.join("/"))
+    }
 }
 
 impl From<Vec<String>> for DataPath {

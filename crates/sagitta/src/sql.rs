@@ -29,6 +29,7 @@ use prost::Message;
 use tracing::{debug, info, warn};
 
 use crate::catalog::StoreCatalog;
+use crate::provider::StoreTableProvider;
 
 /// Result type for SQL operations.
 /// Result type for SQL operations.
@@ -302,6 +303,8 @@ struct Transaction {
     pending_operations: Vec<PendingOperation>,
     /// Named savepoints within this transaction.
     savepoints: HashMap<Bytes, Savepoint>,
+    /// Opaque transaction ID returned by the store's `begin_transaction` hook.
+    store_transaction_id: Bytes,
 }
 
 /// SQL query engine backed by DataFusion.
@@ -357,11 +360,10 @@ impl SqlEngine {
     /// Refresh the SessionContext with current tables from the store.
     ///
     /// Call this after tables are added or removed via DoPut/DoAction.
+    /// Uses incremental catalog replacement to preserve session state such as
+    /// registered views and prepared statements.
     pub async fn refresh_tables(&self) {
-        let ctx =
-            Self::build_session_context(&self.store, &self.catalog_name, &self.default_schema)
-                .await;
-        *self.ctx.write().unwrap() = ctx;
+        self.rebuild_catalog().await;
         debug!("refreshed DataFusion tables from store");
     }
 
@@ -398,6 +400,13 @@ impl SqlEngine {
         // Fall back to underscore-separated
         let segments: Vec<String> = name.split('_').map(|s| s.to_string()).collect();
         DataPath::new(segments)
+    }
+
+    /// Return a clone of the underlying [`SessionContext`].
+    ///
+    /// Used by callers that need direct DataFusion access (e.g. `DoExchange` query mode).
+    pub fn session_ctx(&self) -> SessionContext {
+        self.ctx.read().unwrap().clone()
     }
 
     /// Parse a CMD descriptor into a Flight SQL command.
@@ -679,9 +688,6 @@ impl SqlEngine {
                                 .append_batches(&path, batches)
                                 .await
                                 .map_err(|e| SqlError::Internal(e.to_string()))?;
-
-                            // Refresh the catalog to reflect the new data
-                            self.refresh_catalog().await;
                         }
 
                         info!(
@@ -699,12 +705,20 @@ impl SqlEngine {
                             .await
                             .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
 
+                        let schema = df.schema().inner().clone();
                         let batches = df
                             .collect()
                             .await
                             .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
 
                         let record_count: i64 = batches.iter().map(|b| b.num_rows() as i64).sum();
+
+                        self.store
+                            .put(path.clone(), schema, batches)
+                            .await
+                            .map_err(|e| SqlError::Internal(e.to_string()))?;
+
+                        self.register_table_in_catalog(&path).await;
 
                         info!(
                             path = %path.display(),
@@ -749,8 +763,12 @@ impl SqlEngine {
                                 .await
                                 .map_err(|e| SqlError::Internal(e.to_string()))?;
                         } else {
-                            // UPDATE with WHERE: combine unmodified + modified rows
-                            let where_clause = self.extract_top_level_where(query);
+                            // UPDATE with WHERE: combine unmodified + modified rows.
+                            // Extract the predicate from the logical plan (AST-based, handles
+                            // all SQL expressions including subqueries and complex conditions).
+                            let where_clause = Self::extract_filter_from_plan(input)
+                                .map(|expr| Self::filter_expr_to_sql(&expr))
+                                .transpose()?;
                             let qualified = self.qualified_table_sql(&path);
 
                             let surviving_batches = match where_clause {
@@ -777,8 +795,6 @@ impl SqlEngine {
                                 .await
                                 .map_err(|e| SqlError::Internal(e.to_string()))?;
                         }
-
-                        self.refresh_catalog().await;
 
                         let record_count = if has_filter {
                             affected_count
@@ -815,7 +831,6 @@ impl SqlEngine {
                                 .truncate(&path)
                                 .await
                                 .map_err(|e| SqlError::Internal(e.to_string()))?;
-                            self.refresh_catalog().await;
 
                             info!(
                                 path = %path.display(),
@@ -826,17 +841,20 @@ impl SqlEngine {
                             return Ok((path, old_count));
                         }
 
-                        // DELETE with WHERE: keep only non-matching rows
-                        let where_clause =
-                            self.extract_top_level_where(query).ok_or_else(|| {
+                        // DELETE with WHERE: keep only non-matching rows.
+                        // Extract the predicate from the logical plan (AST-based).
+                        let condition = Self::extract_filter_from_plan(input)
+                            .map(|expr| Self::filter_expr_to_sql(&expr))
+                            .transpose()?
+                            .ok_or_else(|| {
                                 SqlError::Internal(
-                                    "could not extract WHERE clause from DELETE".to_string(),
+                                    "could not extract WHERE clause from DELETE plan".to_string(),
                                 )
                             })?;
                         let qualified = self.qualified_table_sql(&path);
 
                         let surviving_query =
-                            format!("SELECT * FROM {qualified} WHERE NOT ({where_clause})");
+                            format!("SELECT * FROM {qualified} WHERE NOT ({condition})");
                         let sdf = ctx
                             .sql(&surviving_query)
                             .await
@@ -853,7 +871,6 @@ impl SqlEngine {
                             .put(path.clone(), schema, surviving_batches)
                             .await
                             .map_err(|e| SqlError::Internal(e.to_string()))?;
-                        self.refresh_catalog().await;
 
                         info!(
                             path = %path.display(),
@@ -866,10 +883,10 @@ impl SqlEngine {
                 }
             }
             LogicalPlan::Ddl(ddl) => self.execute_ddl(ddl).await,
-            _ => {
-                // Fall back to manual parsing for non-DML statements
-                self.parse_and_execute_update(query).await
-            }
+            other => Err(SqlError::UnsupportedCommand(format!(
+                "unsupported statement type: {}",
+                other.display()
+            ))),
         }
     }
 
@@ -880,7 +897,12 @@ impl SqlEngine {
                 let path = self.table_reference_to_path(&create.name)?;
 
                 // Check if table already exists
-                if self.store.contains(&path).await {
+                if self
+                    .store
+                    .contains(&path)
+                    .await
+                    .map_err(|e| SqlError::Internal(e.to_string()))?
+                {
                     if create.if_not_exists {
                         info!(
                             path = %path.display(),
@@ -922,8 +944,7 @@ impl SqlEngine {
                     .await
                     .map_err(|e| SqlError::Internal(e.to_string()))?;
 
-                // Refresh the catalog to include the new table
-                self.refresh_catalog().await;
+                self.register_table_in_catalog(&path).await;
 
                 info!(
                     path = %path.display(),
@@ -938,7 +959,12 @@ impl SqlEngine {
             }) => {
                 let path = self.table_reference_to_path(name)?;
 
-                if !self.store.contains(&path).await {
+                if !self
+                    .store
+                    .contains(&path)
+                    .await
+                    .map_err(|e| SqlError::Internal(e.to_string()))?
+                {
                     if *if_exists {
                         info!(
                             path = %path.display(),
@@ -955,8 +981,7 @@ impl SqlEngine {
                     .await
                     .map_err(|e| SqlError::Internal(e.to_string()))?;
 
-                // Refresh the catalog
-                self.refresh_catalog().await;
+                self.deregister_table_from_catalog(&path);
 
                 info!(path = %path.display(), "DROP TABLE executed");
 
@@ -1025,7 +1050,12 @@ impl SqlEngine {
             }) => {
                 let schema_name_str = schema_name.to_string();
 
-                if self.store.schema_exists(&schema_name_str).await {
+                if self
+                    .store
+                    .schema_exists(&schema_name_str)
+                    .await
+                    .map_err(|e| SqlError::Internal(e.to_string()))?
+                {
                     if *if_not_exists {
                         info!(
                             schema_name = %schema_name_str,
@@ -1042,7 +1072,7 @@ impl SqlEngine {
                     .create_schema(&schema_name_str)
                     .await
                     .map_err(|e| SqlError::Internal(e.to_string()))?;
-                self.refresh_catalog().await;
+                self.rebuild_catalog().await;
 
                 info!(
                     schema_name = %schema_name_str,
@@ -1068,7 +1098,7 @@ impl SqlEngine {
                     )));
                 }
 
-                self.refresh_catalog().await;
+                self.rebuild_catalog().await;
 
                 info!(
                     schema_name = %schema_name_str,
@@ -1084,12 +1114,53 @@ impl SqlEngine {
         }
     }
 
-    /// Refresh the DataFusion catalog to reflect current Store state.
-    async fn refresh_catalog(&self) {
+    /// Register a single table in the DataFusion catalog.
+    ///
+    /// Used after CREATE TABLE or ALTER TABLE to make the new table visible
+    /// to queries without rebuilding the entire catalog.
+    async fn register_table_in_catalog(&self, path: &DataPath) {
+        let (_, schema_name, table_name) = StoreCatalog::path_to_catalog_schema_table(
+            path,
+            &self.catalog_name,
+            &self.default_schema,
+        );
+        let table_ref = TableReference::Partial {
+            schema: schema_name.into(),
+            table: table_name.into(),
+        };
+        if let Ok(provider) = StoreTableProvider::new(self.store.clone(), path.clone()).await {
+            let ctx = self.ctx.read().unwrap();
+            let _ = ctx.register_table(table_ref, Arc::new(provider));
+        }
+    }
+
+    /// Deregister a single table from the DataFusion catalog.
+    ///
+    /// Used after DROP TABLE.
+    fn deregister_table_from_catalog(&self, path: &DataPath) {
+        let (_, schema_name, table_name) = StoreCatalog::path_to_catalog_schema_table(
+            path,
+            &self.catalog_name,
+            &self.default_schema,
+        );
+        let table_ref = TableReference::Partial {
+            schema: schema_name.into(),
+            table: table_name.into(),
+        };
+        let ctx = self.ctx.read().unwrap();
+        let _ = ctx.deregister_table(table_ref);
+    }
+
+    /// Rebuild the entire DataFusion catalog from the current Store state.
+    ///
+    /// Called only for schema-level DDL (CREATE SCHEMA, DROP SCHEMA) where
+    /// incremental updates are not sufficient.
+    async fn rebuild_catalog(&self) {
         let catalog =
             StoreCatalog::new(self.store.clone(), &self.catalog_name, &self.default_schema).await;
         let ctx = self.ctx.read().unwrap();
         ctx.register_catalog(&self.catalog_name, Arc::new(catalog));
+        debug!("rebuilt DataFusion catalog from store");
     }
 
     /// Convert a DataFusion TableReference to a DataPath.
@@ -1123,46 +1194,26 @@ impl SqlEngine {
         }
     }
 
-    /// Extract the top-level WHERE clause from a SQL statement.
-    ///
-    /// Skips WHERE keywords inside parenthesised subqueries.
-    fn extract_top_level_where<'a>(&self, query: &'a str) -> Option<&'a str> {
-        let lower = query.to_lowercase();
-        let bytes = query.as_bytes();
-        let lower_bytes = lower.as_bytes();
-        let pattern = b" where ";
-        let mut depth: i32 = 0;
-        let mut last_match: Option<usize> = None;
-
-        let mut i = 0;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'(' => depth += 1,
-                b')' => depth = (depth - 1).max(0),
-                b'\'' => {
-                    // Skip string literals
-                    i += 1;
-                    while i < bytes.len() {
-                        if bytes[i] == b'\'' {
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                _ => {}
+    /// Extract the filter predicate `Expr` from a logical plan by walking down
+    /// through projections and subquery aliases.
+    fn extract_filter_from_plan(plan: &LogicalPlan) -> Option<datafusion::logical_expr::Expr> {
+        match plan {
+            LogicalPlan::Filter(filter) => Some(filter.predicate.clone()),
+            LogicalPlan::Projection(proj) => Self::extract_filter_from_plan(proj.input.as_ref()),
+            LogicalPlan::SubqueryAlias(alias) => {
+                Self::extract_filter_from_plan(alias.input.as_ref())
             }
-
-            if depth == 0
-                && i + pattern.len() <= lower_bytes.len()
-                && &lower_bytes[i..i + pattern.len()] == pattern
-            {
-                last_match = Some(i + pattern.len());
-            }
-
-            i += 1;
+            _ => None,
         }
+    }
 
-        last_match.map(|pos| query[pos..].trim())
+    /// Serialise a DataFusion `Expr` to a SQL string using DataFusion's `Unparser`.
+    fn filter_expr_to_sql(expr: &datafusion::logical_expr::Expr) -> SqlResult<String> {
+        use datafusion::sql::unparser::Unparser;
+        Unparser::default()
+            .expr_to_sql(expr)
+            .map(|sql| sql.to_string())
+            .map_err(|e| SqlError::Internal(format!("failed to serialise filter condition: {e}")))
     }
 
     /// Check if a logical plan contains a filter (WHERE clause).
@@ -1177,143 +1228,6 @@ impl SqlEngine {
 
     /// Parse and execute an update statement (INSERT, UPDATE, DELETE).
     ///
-    /// Returns the table path and affected row count.
-    /// This is the synchronous fallback for when DataFusion parsing fails.
-    async fn parse_and_execute_update(&self, query: &str) -> SqlResult<(DataPath, i64)> {
-        let query_lower = query.trim().to_lowercase();
-
-        if query_lower.starts_with("insert") {
-            self.execute_insert(query).await
-        } else if query_lower.starts_with("update") {
-            self.execute_update(query).await
-        } else if query_lower.starts_with("delete") {
-            self.execute_delete(query).await
-        } else {
-            Err(SqlError::SyntaxError(
-                "only INSERT, UPDATE, DELETE statements are supported".to_string(),
-            ))
-        }
-    }
-
-    /// Execute an INSERT statement.
-    ///
-    /// Format: INSERT INTO table_name (cols) VALUES (vals), ...
-    /// For now, counts the number of value tuples as affected rows.
-    async fn execute_insert(&self, query: &str) -> SqlResult<(DataPath, i64)> {
-        let query_lower = query.trim().to_lowercase();
-
-        // Find "into" keyword
-        let into_pos = query_lower
-            .find(" into ")
-            .ok_or_else(|| SqlError::SyntaxError("missing INTO clause".to_string()))?;
-
-        let after_into = &query_lower[into_pos + 6..];
-        let table_name = after_into
-            .split(|c: char| c.is_whitespace() || c == '(')
-            .next()
-            .ok_or_else(|| SqlError::SyntaxError("missing table name".to_string()))?;
-
-        let path = self.parse_table_name(table_name)?;
-
-        // Verify table exists
-        self.store
-            .get_schema(&path)
-            .await
-            .map_err(|_| SqlError::TableNotFound(path.display()))?;
-
-        // Count value tuples by counting "VALUES" occurrences or parentheses pairs
-        // Simple heuristic: count opening parens after VALUES
-        let values_pos = query_lower.find(" values ");
-        let record_count = match values_pos {
-            Some(pos) => {
-                let after_values = &query_lower[pos + 8..];
-                // Count opening parens that start a value tuple
-                after_values.matches('(').count() as i64
-            }
-            None => 1, // Default to 1 for VALUES-less insert
-        };
-
-        Ok((path, record_count))
-    }
-
-    /// Execute an UPDATE statement.
-    ///
-    /// Format: UPDATE table_name SET col=val WHERE condition
-    /// Returns count of records that would be affected.
-    async fn execute_update(&self, query: &str) -> SqlResult<(DataPath, i64)> {
-        let query_lower = query.trim().to_lowercase();
-
-        // Find table name after UPDATE
-        let after_update = query_lower
-            .strip_prefix("update")
-            .ok_or_else(|| SqlError::SyntaxError("invalid UPDATE syntax".to_string()))?
-            .trim_start();
-
-        let table_name = after_update
-            .split(|c: char| c.is_whitespace())
-            .next()
-            .ok_or_else(|| SqlError::SyntaxError("missing table name".to_string()))?;
-
-        let path = self.parse_table_name(table_name)?;
-
-        // Get current record count - UPDATE affects existing records
-        let info = self
-            .store
-            .get(&path)
-            .await
-            .map_err(|_| SqlError::TableNotFound(path.display()))?;
-
-        // If WHERE clause exists, assume partial update (return half for simulation)
-        // Otherwise assume all records affected
-        let record_count = if query_lower.contains(" where ") {
-            // Simulate partial update - return at least 1 if table has records
-            (info.total_records as i64).max(1) / 2
-        } else {
-            info.total_records as i64
-        };
-
-        Ok((path, record_count.max(0)))
-    }
-
-    /// Execute a DELETE statement.
-    ///
-    /// Format: DELETE FROM table_name WHERE condition
-    /// Returns count of records that would be deleted.
-    async fn execute_delete(&self, query: &str) -> SqlResult<(DataPath, i64)> {
-        let query_lower = query.trim().to_lowercase();
-
-        // Find "from" keyword
-        let from_pos = query_lower
-            .find(" from ")
-            .ok_or_else(|| SqlError::SyntaxError("missing FROM clause".to_string()))?;
-
-        let after_from = &query_lower[from_pos + 6..];
-        let table_name = after_from
-            .split_whitespace()
-            .next()
-            .ok_or_else(|| SqlError::SyntaxError("missing table name".to_string()))?;
-
-        let path = self.parse_table_name(table_name)?;
-
-        // Get current record count
-        let info = self
-            .store
-            .get(&path)
-            .await
-            .map_err(|_| SqlError::TableNotFound(path.display()))?;
-
-        // If WHERE clause exists, assume partial delete
-        // Otherwise assume all records deleted
-        let record_count = if query_lower.contains(" where ") {
-            // Simulate partial delete - return at least 1 if table has records
-            (info.total_records as i64).max(1) / 2
-        } else {
-            info.total_records as i64
-        };
-
-        Ok((path, record_count.max(0)))
-    }
-
     /// Execute a TRUNCATE TABLE statement.
     ///
     /// Format: TRUNCATE [TABLE] table_name
@@ -1355,9 +1269,6 @@ impl SqlEngine {
             .truncate(&path)
             .await
             .map_err(|e| SqlError::Internal(e.to_string()))?;
-
-        // Refresh the catalog
-        self.refresh_catalog().await;
 
         info!(
             path = %path.display(),
@@ -1409,12 +1320,19 @@ impl SqlEngine {
             .map_err(|_| SqlError::TableNotFound(path.display()))?;
 
         // Get current batches
-        let current_batches = self
-            .store
-            .get_batches(&path)
-            .await
-            .map_err(|e| SqlError::Internal(e.to_string()))?;
-
+        let current_batches: Vec<Arc<RecordBatch>> = {
+            use futures::TryStreamExt;
+            let stream = self
+                .store
+                .get_batches(&path)
+                .await
+                .map_err(|e| SqlError::Internal(e.to_string()))?;
+            let owned: Vec<RecordBatch> = stream
+                .try_collect()
+                .await
+                .map_err(|e| SqlError::Internal(e.to_string()))?;
+            owned.into_iter().map(Arc::new).collect()
+        };
         let (new_schema, new_batches) = if operation.starts_with("add ") {
             self.alter_add_column(operation, &current_schema, &current_batches)?
         } else if operation.starts_with("drop ") {
@@ -1439,8 +1357,7 @@ impl SqlEngine {
             .await
             .map_err(|e| SqlError::Internal(e.to_string()))?;
 
-        // Refresh the catalog
-        self.refresh_catalog().await;
+        self.register_table_in_catalog(&path).await;
 
         info!(path = %path.display(), "ALTER TABLE executed");
 
@@ -1918,7 +1835,6 @@ impl SqlEngine {
             .put(target_path.clone(), target_schema, all_batches)
             .await
             .map_err(|e| SqlError::Internal(e.to_string()))?;
-        self.refresh_catalog().await;
 
         info!(
             target = %target_path.display(),
@@ -2153,7 +2069,6 @@ impl SqlEngine {
             .put(path.clone(), target_schema, all_batches)
             .await
             .map_err(|e| SqlError::Internal(e.to_string()))?;
-        self.refresh_catalog().await;
 
         info!(
             path = %path.display(),
@@ -2648,12 +2563,18 @@ impl SqlEngine {
     ) -> SqlResult<(SchemaRef, QueryDataStream)> {
         debug!(handle = %String::from_utf8_lossy(handle), "getting prepared statement data stream via DataFusion");
 
-        let query = {
+        let (query, bound) = {
             let statements = self.prepared_statements.read().unwrap();
             let stmt = statements.get(handle).ok_or_else(|| {
                 SqlError::PreparedStatementNotFound(String::from_utf8_lossy(handle).to_string())
             })?;
-            stmt.query.clone()
+            (stmt.query.clone(), stmt.bound_parameters.clone())
+        };
+
+        let query = if let Some(ref params) = bound {
+            Self::substitute_parameters(&query, params)?
+        } else {
+            query
         };
 
         // Execute using DataFusion
@@ -2687,7 +2608,7 @@ impl SqlEngine {
         let handle = &cmd.prepared_statement_handle;
         debug!(handle = %String::from_utf8_lossy(handle), "executing prepared statement update");
 
-        let query = {
+        let (query, bound) = {
             let statements = self.prepared_statements.read().unwrap();
             let stmt = statements.get(handle).ok_or_else(|| {
                 SqlError::PreparedStatementNotFound(String::from_utf8_lossy(handle).to_string())
@@ -2699,7 +2620,13 @@ impl SqlEngine {
                 ));
             }
 
-            stmt.query.clone()
+            (stmt.query.clone(), stmt.bound_parameters.clone())
+        };
+
+        let query = if let Some(ref params) = bound {
+            Self::substitute_parameters(&query, params)?
+        } else {
+            query
         };
 
         // Execute the stored update via DataFusion
@@ -2722,6 +2649,90 @@ impl SqlEngine {
         // In a full implementation, we'd parse ? placeholders and infer types
         // For now, return an empty schema indicating no parameters
         Some(Arc::new(Schema::new(Vec::<Field>::new())))
+    }
+
+    /// Substitute bound parameters into a query string.
+    ///
+    /// Replaces `?` placeholders in order with SQL literal representations of the
+    /// values taken from the first row of the first parameter batch. Returns the
+    /// original query unchanged when no parameters are bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if scalar value serialisation fails or if there are fewer
+    /// bound values than `?` placeholders in the query.
+    fn substitute_parameters(query: &str, params: &[Arc<RecordBatch>]) -> SqlResult<String> {
+        use datafusion::common::ScalarValue;
+        use datafusion::logical_expr::Expr as DfExpr;
+        use datafusion::sql::unparser::Unparser;
+
+        if params.is_empty() {
+            return Ok(query.to_string());
+        }
+
+        let batch = &params[0];
+        if batch.num_rows() == 0 {
+            return Ok(query.to_string());
+        }
+
+        // Extract one scalar per column from the first row.
+        let unparser = Unparser::default();
+        let mut literals: Vec<String> = Vec::with_capacity(batch.num_columns());
+        for col_idx in 0..batch.num_columns() {
+            let scalar = ScalarValue::try_from_array(batch.column(col_idx), 0).map_err(|e| {
+                SqlError::Internal(format!("failed to extract parameter {col_idx}: {e}"))
+            })?;
+            let sql_expr = unparser
+                .expr_to_sql(&DfExpr::Literal(scalar, None))
+                .map_err(|e| {
+                    SqlError::Internal(format!("failed to serialise parameter {col_idx}: {e}"))
+                })?;
+            literals.push(sql_expr.to_string());
+        }
+
+        // Replace each `?` placeholder (outside string literals) with the next value.
+        let mut result = String::with_capacity(query.len());
+        let mut param_idx = 0usize;
+        let chars: Vec<char> = query.chars().collect();
+        let mut i = 0;
+        let mut in_string = false;
+        let mut string_char = '"';
+
+        while i < chars.len() {
+            let c = chars[i];
+            match c {
+                '\'' | '"' if !in_string => {
+                    in_string = true;
+                    string_char = c;
+                    result.push(c);
+                }
+                c if in_string && c == string_char => {
+                    // Handle escaped quotes ('' or "")
+                    if i + 1 < chars.len() && chars[i + 1] == string_char {
+                        result.push(c);
+                        result.push(c);
+                        i += 2;
+                        continue;
+                    }
+                    in_string = false;
+                    result.push(c);
+                }
+                '?' if !in_string => {
+                    let literal = literals.get(param_idx).ok_or_else(|| {
+                        SqlError::InvalidCommand(format!(
+                            "not enough bound parameters: placeholder {} has no value",
+                            param_idx + 1
+                        ))
+                    })?;
+                    result.push_str(literal);
+                    param_idx += 1;
+                }
+                _ => result.push(c),
+            }
+            i += 1;
+        }
+
+        Ok(result)
     }
 
     /// Parse DML statement to extract table name.
@@ -2767,24 +2778,34 @@ impl SqlEngine {
 
     /// Begin a new transaction.
     ///
-    /// Returns a unique transaction ID.
-    pub fn begin_transaction(&self) -> SqlResult<Bytes> {
+    /// Returns a unique transaction ID. Also calls the store's
+    /// `begin_transaction` hook so backends with native transaction support
+    /// can participate.
+    pub async fn begin_transaction(&self) -> SqlResult<Bytes> {
         self.begin_transaction_with_isolation(IsolationLevel::default())
+            .await
     }
 
     /// Begin a new transaction with a specific isolation level.
     ///
     /// Returns a unique transaction ID.
-    pub fn begin_transaction_with_isolation(
+    pub async fn begin_transaction_with_isolation(
         &self,
         isolation_level: IsolationLevel,
     ) -> SqlResult<Bytes> {
+        let store_txn_id = self
+            .store
+            .begin_transaction()
+            .await
+            .map_err(|e| SqlError::Internal(e.to_string()))?;
+
         let id = self.generate_handle();
         let transaction = Transaction {
             active: true,
             isolation_level,
             pending_operations: Vec::new(),
             savepoints: HashMap::new(),
+            store_transaction_id: store_txn_id,
         };
 
         self.transactions
@@ -2802,101 +2823,106 @@ impl SqlEngine {
     }
 
     /// End a transaction (commit or rollback).
-    pub fn end_transaction(&self, transaction_id: &Bytes, action: EndTransaction) -> SqlResult<()> {
+    ///
+    /// Calls the store's `commit_transaction` or `rollback_transaction` hook
+    /// after updating the engine's internal transaction state.
+    pub async fn end_transaction(
+        &self,
+        transaction_id: &Bytes,
+        action: EndTransaction,
+    ) -> SqlResult<()> {
         debug!(
             transaction_id = %String::from_utf8_lossy(transaction_id),
             action = ?action,
             "ending transaction"
         );
 
-        let mut transactions = self.transactions.write().unwrap();
-        let transaction = transactions.get_mut(transaction_id).ok_or_else(|| {
-            SqlError::TransactionNotFound(String::from_utf8_lossy(transaction_id).to_string())
-        })?;
+        let (store_txn_id, commit) = {
+            let mut transactions = self.transactions.write().unwrap();
+            let transaction = transactions.get_mut(transaction_id).ok_or_else(|| {
+                SqlError::TransactionNotFound(String::from_utf8_lossy(transaction_id).to_string())
+            })?;
 
-        if !transaction.active {
-            return Err(SqlError::InvalidTransactionAction(
-                "transaction already ended".to_string(),
-            ));
-        }
-
-        let pending_count = transaction.pending_operations.len();
-        let total_records: i64 = transaction
-            .pending_operations
-            .iter()
-            .map(|op| op.record_count())
-            .sum();
-
-        match action {
-            EndTransaction::Commit => {
-                // Apply all pending operations
-                for op in &transaction.pending_operations {
-                    match op {
-                        PendingOperation::Insert {
-                            path,
-                            query,
-                            record_count,
-                        } => {
-                            debug!(
-                                path = %path.display(),
-                                query = %query,
-                                record_count,
-                                "committing INSERT"
-                            );
-                            // In a full implementation, this would apply the actual data changes
-                        }
-                        PendingOperation::Update {
-                            path,
-                            query,
-                            record_count,
-                        } => {
-                            debug!(
-                                path = %path.display(),
-                                query = %query,
-                                record_count,
-                                "committing UPDATE"
-                            );
-                        }
-                        PendingOperation::Delete {
-                            path,
-                            query,
-                            record_count,
-                        } => {
-                            debug!(
-                                path = %path.display(),
-                                query = %query,
-                                record_count,
-                                "committing DELETE"
-                            );
-                        }
-                    }
-                }
-                info!(
-                    transaction_id = %String::from_utf8_lossy(transaction_id),
-                    pending_operations = pending_count,
-                    total_records_affected = total_records,
-                    "transaction committed"
-                );
-            }
-            EndTransaction::Rollback => {
-                info!(
-                    transaction_id = %String::from_utf8_lossy(transaction_id),
-                    pending_operations = pending_count,
-                    total_records_discarded = total_records,
-                    "transaction rolled back (pending operations discarded)"
-                );
-                // Simply discard pending operations (done automatically when transaction is removed)
-            }
-            EndTransaction::Unspecified => {
+            if !transaction.active {
                 return Err(SqlError::InvalidTransactionAction(
-                    "unspecified transaction action".to_string(),
+                    "transaction already ended".to_string(),
                 ));
             }
-        }
 
-        transaction.active = false;
-        // Remove completed transaction from the map (discards pending operations on rollback)
-        transactions.remove(transaction_id);
+            let pending_count = transaction.pending_operations.len();
+            let total_records: i64 = transaction
+                .pending_operations
+                .iter()
+                .map(|op| op.record_count())
+                .sum();
+
+            match action {
+                EndTransaction::Commit => {
+                    for op in &transaction.pending_operations {
+                        match op {
+                            PendingOperation::Insert {
+                                path,
+                                query,
+                                record_count,
+                            } => {
+                                debug!(path = %path.display(), query = %query, record_count, "committing INSERT");
+                            }
+                            PendingOperation::Update {
+                                path,
+                                query,
+                                record_count,
+                            } => {
+                                debug!(path = %path.display(), query = %query, record_count, "committing UPDATE");
+                            }
+                            PendingOperation::Delete {
+                                path,
+                                query,
+                                record_count,
+                            } => {
+                                debug!(path = %path.display(), query = %query, record_count, "committing DELETE");
+                            }
+                        }
+                    }
+                    info!(
+                        transaction_id = %String::from_utf8_lossy(transaction_id),
+                        pending_operations = pending_count,
+                        total_records_affected = total_records,
+                        "transaction committed"
+                    );
+                }
+                EndTransaction::Rollback => {
+                    info!(
+                        transaction_id = %String::from_utf8_lossy(transaction_id),
+                        pending_operations = pending_count,
+                        total_records_discarded = total_records,
+                        "transaction rolled back"
+                    );
+                }
+                EndTransaction::Unspecified => {
+                    return Err(SqlError::InvalidTransactionAction(
+                        "unspecified transaction action".to_string(),
+                    ));
+                }
+            }
+
+            transaction.active = false;
+            let store_txn_id = transaction.store_transaction_id.clone();
+            transactions.remove(transaction_id);
+            (store_txn_id, matches!(action, EndTransaction::Commit))
+        };
+
+        // Call store hooks outside the lock.
+        if commit {
+            self.store
+                .commit_transaction(&store_txn_id)
+                .await
+                .map_err(|e| SqlError::Internal(e.to_string()))?;
+        } else {
+            self.store
+                .rollback_transaction(&store_txn_id)
+                .await
+                .map_err(|e| SqlError::Internal(e.to_string()))?;
+        }
 
         Ok(())
     }
@@ -4260,10 +4286,10 @@ mod tests {
     async fn test_begin_transaction() {
         let engine = create_test_engine().await;
 
-        let transaction_id = engine.begin_transaction().unwrap();
+        let transaction_id = engine.begin_transaction().await.unwrap();
         assert!(!transaction_id.is_empty());
         // Transaction IDs should be unique
-        let transaction_id2 = engine.begin_transaction().unwrap();
+        let transaction_id2 = engine.begin_transaction().await.unwrap();
         assert_ne!(transaction_id, transaction_id2);
     }
 
@@ -4271,9 +4297,10 @@ mod tests {
     async fn test_end_transaction_commit() {
         let engine = create_test_engine().await;
 
-        let transaction_id = engine.begin_transaction().unwrap();
+        let transaction_id = engine.begin_transaction().await.unwrap();
         engine
             .end_transaction(&transaction_id, EndTransaction::Commit)
+            .await
             .unwrap();
     }
 
@@ -4281,9 +4308,10 @@ mod tests {
     async fn test_end_transaction_rollback() {
         let engine = create_test_engine().await;
 
-        let transaction_id = engine.begin_transaction().unwrap();
+        let transaction_id = engine.begin_transaction().await.unwrap();
         engine
             .end_transaction(&transaction_id, EndTransaction::Rollback)
+            .await
             .unwrap();
     }
 
@@ -4291,8 +4319,9 @@ mod tests {
     async fn test_end_transaction_not_found() {
         let engine = create_test_engine().await;
 
-        let result =
-            engine.end_transaction(&bytes::Bytes::from("nonexistent"), EndTransaction::Commit);
+        let result = engine
+            .end_transaction(&bytes::Bytes::from("nonexistent"), EndTransaction::Commit)
+            .await;
         assert!(matches!(result, Err(SqlError::TransactionNotFound(_))));
     }
 
@@ -4300,8 +4329,10 @@ mod tests {
     async fn test_end_transaction_unspecified_fails() {
         let engine = create_test_engine().await;
 
-        let transaction_id = engine.begin_transaction().unwrap();
-        let result = engine.end_transaction(&transaction_id, EndTransaction::Unspecified);
+        let transaction_id = engine.begin_transaction().await.unwrap();
+        let result = engine
+            .end_transaction(&transaction_id, EndTransaction::Unspecified)
+            .await;
         assert!(matches!(result, Err(SqlError::InvalidTransactionAction(_))));
     }
 
@@ -4309,13 +4340,16 @@ mod tests {
     async fn test_end_transaction_twice_fails() {
         let engine = create_test_engine().await;
 
-        let transaction_id = engine.begin_transaction().unwrap();
+        let transaction_id = engine.begin_transaction().await.unwrap();
         engine
             .end_transaction(&transaction_id, EndTransaction::Commit)
+            .await
             .unwrap();
 
         // Ending the same transaction again should fail (transaction removed)
-        let result = engine.end_transaction(&transaction_id, EndTransaction::Commit);
+        let result = engine
+            .end_transaction(&transaction_id, EndTransaction::Commit)
+            .await;
         assert!(matches!(result, Err(SqlError::TransactionNotFound(_))));
     }
 
@@ -4323,7 +4357,7 @@ mod tests {
     async fn test_transaction_buffers_update() {
         let engine = create_test_engine().await;
 
-        let transaction_id = engine.begin_transaction().unwrap();
+        let transaction_id = engine.begin_transaction().await.unwrap();
 
         // Execute an update within the transaction
         let cmd = CommandStatementUpdate {
@@ -4351,6 +4385,7 @@ mod tests {
         // Commit should succeed
         engine
             .end_transaction(&transaction_id, EndTransaction::Commit)
+            .await
             .unwrap();
     }
 
@@ -4358,7 +4393,7 @@ mod tests {
     async fn test_transaction_rollback_discards_operations() {
         let engine = create_test_engine().await;
 
-        let transaction_id = engine.begin_transaction().unwrap();
+        let transaction_id = engine.begin_transaction().await.unwrap();
 
         // Execute updates within the transaction
         let cmd1 = CommandStatementUpdate {
@@ -4380,6 +4415,7 @@ mod tests {
         // Rollback discards operations
         engine
             .end_transaction(&transaction_id, EndTransaction::Rollback)
+            .await
             .unwrap();
 
         // Transaction is gone
@@ -4430,7 +4466,7 @@ mod tests {
 
         // Verify the table was created
         let path = DataPath::new(vec!["new_table".to_string()]);
-        assert!(store.contains(&path).await);
+        assert!(store.contains(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -4447,7 +4483,7 @@ mod tests {
 
         // Verify the table was created with qualified path
         let path = DataPath::new(vec!["myschema".to_string(), "mytable".to_string()]);
-        assert!(store.contains(&path).await);
+        assert!(store.contains(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -4526,7 +4562,7 @@ mod tests {
         engine.execute_statement_update(&cmd).await.unwrap();
 
         let path = DataPath::new(vec!["temp_table".to_string()]);
-        assert!(store.contains(&path).await);
+        assert!(store.contains(&path).await.unwrap());
 
         // Drop the table
         let cmd = CommandStatementUpdate {
@@ -4537,7 +4573,7 @@ mod tests {
         assert_eq!(result.record_count, 0);
 
         // Verify the table is gone
-        assert!(!store.contains(&path).await);
+        assert!(!store.contains(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -4553,7 +4589,7 @@ mod tests {
         engine.execute_statement_update(&cmd).await.unwrap();
 
         let path = DataPath::new(vec!["myschema".to_string(), "temp".to_string()]);
-        assert!(store.contains(&path).await);
+        assert!(store.contains(&path).await.unwrap());
 
         // Drop the table with qualified name
         let cmd = CommandStatementUpdate {
@@ -4562,7 +4598,7 @@ mod tests {
         };
         engine.execute_statement_update(&cmd).await.unwrap();
 
-        assert!(!store.contains(&path).await);
+        assert!(!store.contains(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -5310,7 +5346,16 @@ mod tests {
         assert_eq!(schema_after.field(2).data_type(), &DataType::Utf8);
 
         // Data should still be there with nulls in new column
-        let batches = store.get_batches(&path).await.unwrap();
+        let batches: Vec<_> = {
+            use futures::TryStreamExt;
+            store
+                .get_batches(&path)
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap()
+        };
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 5);
     }
@@ -5376,7 +5421,16 @@ mod tests {
         assert_eq!(schema_after.field(0).name(), "id");
 
         // Data should still be there
-        let batches = store.get_batches(&path).await.unwrap();
+        let batches: Vec<_> = {
+            use futures::TryStreamExt;
+            store
+                .get_batches(&path)
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap()
+        };
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 5);
     }
@@ -5442,7 +5496,16 @@ mod tests {
         assert_eq!(schema_after.field(1).name(), "amount");
 
         // Data should still be there
-        let batches = store.get_batches(&path).await.unwrap();
+        let batches: Vec<_> = {
+            use futures::TryStreamExt;
+            store
+                .get_batches(&path)
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap()
+        };
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 5);
     }
@@ -5864,6 +5927,7 @@ mod tests {
         // Test each isolation level
         let txn1 = engine
             .begin_transaction_with_isolation(IsolationLevel::ReadUncommitted)
+            .await
             .unwrap();
         assert_eq!(
             engine.get_transaction_isolation_level(&txn1).unwrap(),
@@ -5872,6 +5936,7 @@ mod tests {
 
         let txn2 = engine
             .begin_transaction_with_isolation(IsolationLevel::Serializable)
+            .await
             .unwrap();
         assert_eq!(
             engine.get_transaction_isolation_level(&txn2).unwrap(),
@@ -5879,7 +5944,7 @@ mod tests {
         );
 
         // Default transaction uses ReadCommitted
-        let txn3 = engine.begin_transaction().unwrap();
+        let txn3 = engine.begin_transaction().await.unwrap();
         assert_eq!(
             engine.get_transaction_isolation_level(&txn3).unwrap(),
             IsolationLevel::ReadCommitted
@@ -5892,7 +5957,7 @@ mod tests {
     async fn test_begin_savepoint() {
         let engine = create_test_engine().await;
 
-        let txn_id = engine.begin_transaction().unwrap();
+        let txn_id = engine.begin_transaction().await.unwrap();
 
         // Create a savepoint
         let savepoint_id = engine.begin_savepoint(&txn_id, "sp1".to_string()).unwrap();
@@ -5910,9 +5975,10 @@ mod tests {
     async fn test_savepoint_in_inactive_transaction() {
         let engine = create_test_engine().await;
 
-        let txn_id = engine.begin_transaction().unwrap();
+        let txn_id = engine.begin_transaction().await.unwrap();
         engine
             .end_transaction(&txn_id, EndTransaction::Commit)
+            .await
             .unwrap();
 
         // Try to create savepoint in ended transaction
@@ -5924,7 +5990,7 @@ mod tests {
     async fn test_savepoint_release() {
         let engine = create_test_engine().await;
 
-        let txn_id = engine.begin_transaction().unwrap();
+        let txn_id = engine.begin_transaction().await.unwrap();
         let savepoint_id = engine.begin_savepoint(&txn_id, "sp1".to_string()).unwrap();
 
         // Release savepoint (keeps operations)
@@ -5940,7 +6006,7 @@ mod tests {
     async fn test_savepoint_rollback() {
         let engine = create_test_engine().await;
 
-        let txn_id = engine.begin_transaction().unwrap();
+        let txn_id = engine.begin_transaction().await.unwrap();
 
         // Add an operation
         let cmd = CommandStatementUpdate {
@@ -5972,7 +6038,7 @@ mod tests {
     async fn test_savepoint_rollback_nested() {
         let engine = create_test_engine().await;
 
-        let txn_id = engine.begin_transaction().unwrap();
+        let txn_id = engine.begin_transaction().await.unwrap();
 
         // Add operation 1 (using existing table from test fixtures)
         let cmd = CommandStatementUpdate {
@@ -6017,7 +6083,7 @@ mod tests {
     async fn test_end_savepoint_invalid_savepoint() {
         let engine = create_test_engine().await;
 
-        let txn_id = engine.begin_transaction().unwrap();
+        let txn_id = engine.begin_transaction().await.unwrap();
         let _savepoint_id = engine.begin_savepoint(&txn_id, "sp1".to_string()).unwrap();
 
         // Try to end a non-existent savepoint
@@ -6029,7 +6095,7 @@ mod tests {
     async fn test_end_savepoint_unspecified_action() {
         let engine = create_test_engine().await;
 
-        let txn_id = engine.begin_transaction().unwrap();
+        let txn_id = engine.begin_transaction().await.unwrap();
         let savepoint_id = engine.begin_savepoint(&txn_id, "sp1".to_string()).unwrap();
 
         // Unspecified action should fail
@@ -6056,7 +6122,7 @@ mod tests {
     async fn test_transaction_commit_clears_savepoints() {
         let engine = create_test_engine().await;
 
-        let txn_id = engine.begin_transaction().unwrap();
+        let txn_id = engine.begin_transaction().await.unwrap();
         let _sp1 = engine.begin_savepoint(&txn_id, "sp1".to_string()).unwrap();
         let _sp2 = engine.begin_savepoint(&txn_id, "sp2".to_string()).unwrap();
         assert_eq!(engine.get_savepoint_count(&txn_id).unwrap(), 2);
@@ -6064,6 +6130,7 @@ mod tests {
         // Commit transaction
         engine
             .end_transaction(&txn_id, EndTransaction::Commit)
+            .await
             .unwrap();
 
         // Transaction is gone

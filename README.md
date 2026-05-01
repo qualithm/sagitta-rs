@@ -76,11 +76,9 @@ async fn main() -> anyhow::Result<()> {
 
 ### Crates
 
-| Crate           | Purpose                                         |
-| --------------- | ----------------------------------------------- |
-| `sagitta`       | Server framework library and default binary     |
-| `sagitta-core`  | Core types, error handling, shared utilities    |
-| `sagitta-store` | Storage backend abstraction and implementations |
+| Crate     | Purpose                                    |
+| --------- | ------------------------------------------ |
+| `sagitta` | Arrow Flight SQL server library and binary |
 
 ### Configuration
 

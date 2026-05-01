@@ -81,10 +81,13 @@ pub trait UserStore: Send + Sync {
 /// In-memory [`UserStore`] for testing and development.
 ///
 /// All credentials and tokens are held in memory and lost on restart.
+/// Tokens expire after `token_ttl_secs` seconds (default 3600).
 #[derive(Debug)]
 pub struct InMemoryUserStore {
     users: HashMap<String, (String, AccessLevel)>,
-    tokens: std::sync::RwLock<HashMap<AuthToken, User>>,
+    tokens: std::sync::RwLock<HashMap<AuthToken, (User, std::time::Instant)>>,
+    /// Token time-to-live in seconds. Zero means tokens never expire.
+    token_ttl_secs: u64,
 }
 
 impl Default for InMemoryUserStore {
@@ -94,11 +97,23 @@ impl Default for InMemoryUserStore {
 }
 
 impl InMemoryUserStore {
-    /// Create a new empty user store.
+    /// Create a new empty user store with a 1-hour token TTL.
     pub fn new() -> Self {
         Self {
             users: HashMap::new(),
             tokens: std::sync::RwLock::new(HashMap::new()),
+            token_ttl_secs: 3600,
+        }
+    }
+
+    /// Create a new empty user store with a custom token TTL.
+    ///
+    /// Pass `0` to disable token expiry.
+    pub fn with_token_ttl(token_ttl_secs: u64) -> Self {
+        Self {
+            users: HashMap::new(),
+            tokens: std::sync::RwLock::new(HashMap::new()),
+            token_ttl_secs,
         }
     }
 
@@ -116,6 +131,7 @@ impl InMemoryUserStore {
         Self {
             users,
             tokens: std::sync::RwLock::new(HashMap::new()),
+            token_ttl_secs: 3600,
         }
     }
 
@@ -123,6 +139,17 @@ impl InMemoryUserStore {
     pub fn add_user(&mut self, username: &str, password: &str, access: AccessLevel) {
         self.users
             .insert(username.to_string(), (password.to_string(), access));
+    }
+
+    /// Remove expired tokens from the store.
+    fn evict_expired(&self) {
+        if self.token_ttl_secs == 0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let ttl = std::time::Duration::from_secs(self.token_ttl_secs);
+        let mut tokens = self.tokens.write().unwrap();
+        tokens.retain(|_, (_, created_at)| now.duration_since(*created_at) < ttl);
     }
 
     /// Generate and store a token for a user.
@@ -140,7 +167,7 @@ impl InMemoryUserStore {
         let token = AuthToken::new(base64_encode(&token_data));
 
         let mut tokens = self.tokens.write().unwrap();
-        tokens.insert(token.clone(), user.clone());
+        tokens.insert(token.clone(), (user.clone(), std::time::Instant::now()));
 
         token
     }
@@ -160,8 +187,20 @@ impl UserStore for InMemoryUserStore {
     }
 
     fn user_for_token(&self, token: &AuthToken) -> Option<User> {
+        self.evict_expired();
         let tokens = self.tokens.read().unwrap();
-        tokens.get(token).cloned()
+        if self.token_ttl_secs == 0 {
+            tokens.get(token).map(|(user, _)| user.clone())
+        } else {
+            let ttl = std::time::Duration::from_secs(self.token_ttl_secs);
+            tokens.get(token).and_then(|(user, created_at)| {
+                if std::time::Instant::now().duration_since(*created_at) < ttl {
+                    Some(user.clone())
+                } else {
+                    None
+                }
+            })
+        }
     }
 
     fn create_token(&self, user: &User) -> AuthToken {
