@@ -12,6 +12,9 @@ use arrow_array::builder::{
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use async_trait::async_trait;
+use datafusion::execution::SendableRecordBatchStream;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use futures::stream;
 
 use crate::store::{Dataset, Store};
 
@@ -72,7 +75,7 @@ impl MemoryStore {
         let mut datasets = self
             .datasets
             .write()
-            .map_err(|e| Error::Internal(format!("failed to acquire write lock: {}", e)))?;
+            .map_err(|_| Error::Aborted("write conflict: store lock poisoned".to_string()))?;
 
         datasets.insert(
             path,
@@ -471,7 +474,7 @@ impl Default for MemoryStore {
 
 #[async_trait]
 impl Store for MemoryStore {
-    async fn list(&self) -> Result<Vec<Dataset>> {
+    async fn list(&self, schema_filter: Option<&str>) -> Result<Vec<Dataset>> {
         let datasets = self
             .datasets
             .read()
@@ -479,11 +482,22 @@ impl Store for MemoryStore {
 
         Ok(datasets
             .iter()
+            .filter(|(path, _)| match schema_filter {
+                None => true,
+                Some(filter) => path
+                    .segments()
+                    .first()
+                    .map(|s| s == filter)
+                    .unwrap_or(false),
+            })
             .map(|(path, entry)| Dataset {
                 path: path.clone(),
                 schema: entry.schema.clone(),
                 total_records: entry.total_records(),
                 total_bytes: entry.total_bytes(),
+                created_at: None,
+                updated_at: None,
+                tags: Default::default(),
             })
             .collect())
     }
@@ -503,6 +517,9 @@ impl Store for MemoryStore {
             schema: entry.schema.clone(),
             total_records: entry.total_records(),
             total_bytes: entry.total_bytes(),
+            created_at: None,
+            updated_at: None,
+            tags: Default::default(),
         })
     }
 
@@ -519,17 +536,26 @@ impl Store for MemoryStore {
         Ok(entry.schema.clone())
     }
 
-    async fn get_batches(&self, path: &DataPath) -> Result<Vec<Arc<RecordBatch>>> {
-        let datasets = self
-            .datasets
-            .read()
-            .map_err(|e| Error::Internal(format!("failed to acquire read lock: {}", e)))?;
+    async fn get_batches(&self, path: &DataPath) -> Result<SendableRecordBatchStream> {
+        let (schema, arc_batches) = {
+            let datasets = self
+                .datasets
+                .read()
+                .map_err(|e| Error::Internal(format!("failed to acquire read lock: {}", e)))?;
 
-        let entry = datasets
-            .get(path)
-            .ok_or_else(|| Error::NotFound(path.display()))?;
+            let entry = datasets
+                .get(path)
+                .ok_or_else(|| Error::NotFound(path.display()))?;
 
-        Ok(entry.batches.clone())
+            (entry.schema.clone(), entry.batches.clone())
+        };
+
+        let owned: Vec<RecordBatch> = arc_batches.iter().map(|b| b.as_ref().clone()).collect();
+        let batch_stream = stream::iter(owned.into_iter().map(Ok));
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            batch_stream,
+        )))
     }
 
     async fn put(
@@ -545,13 +571,12 @@ impl Store for MemoryStore {
         let mut datasets = self
             .datasets
             .write()
-            .map_err(|e| Error::Internal(format!("failed to acquire write lock: {}", e)))?;
+            .map_err(|_| Error::Aborted("write conflict: store lock poisoned".to_string()))?;
 
         let entry = datasets
             .get_mut(path)
             .ok_or_else(|| Error::NotFound(path.display()))?;
 
-        // Append the new batches
         for batch in batches {
             entry.batches.push(Arc::new(batch));
         }
@@ -563,30 +588,46 @@ impl Store for MemoryStore {
         let mut datasets = self
             .datasets
             .write()
-            .map_err(|e| Error::Internal(format!("failed to acquire write lock: {}", e)))?;
+            .map_err(|_| Error::Aborted("write conflict: store lock poisoned".to_string()))?;
 
         let entry = datasets
             .get_mut(path)
             .ok_or_else(|| Error::NotFound(path.display()))?;
 
-        // Clear all batches, keeping the schema
         entry.batches.clear();
 
         Ok(())
     }
 
-    async fn contains(&self, path: &DataPath) -> bool {
-        self.datasets
+    async fn update_schema(&self, path: &DataPath, schema: SchemaRef) -> Result<()> {
+        let mut datasets = self
+            .datasets
+            .write()
+            .map_err(|_| Error::Aborted("write conflict: store lock poisoned".to_string()))?;
+
+        let entry = datasets
+            .get_mut(path)
+            .ok_or_else(|| Error::NotFound(path.display()))?;
+
+        entry.schema = schema;
+
+        Ok(())
+    }
+
+    async fn contains(&self, path: &DataPath) -> Result<bool> {
+        let datasets = self
+            .datasets
             .read()
-            .map(|f| f.contains_key(path))
-            .unwrap_or(false)
+            .map_err(|e| Error::Internal(format!("failed to acquire read lock: {}", e)))?;
+
+        Ok(datasets.contains_key(path))
     }
 
     async fn remove(&self, path: &DataPath) -> Result<()> {
         let mut datasets = self
             .datasets
             .write()
-            .map_err(|e| Error::Internal(format!("failed to acquire write lock: {}", e)))?;
+            .map_err(|_| Error::Aborted("write conflict: store lock poisoned".to_string()))?;
 
         datasets
             .remove(path)
@@ -595,11 +636,50 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    async fn copy(&self, src: &DataPath, dst: DataPath) -> Result<()> {
+        let (schema, batches) = {
+            let datasets = self
+                .datasets
+                .read()
+                .map_err(|e| Error::Internal(format!("failed to acquire read lock: {}", e)))?;
+
+            let entry = datasets
+                .get(src)
+                .ok_or_else(|| Error::NotFound(src.display()))?;
+
+            (entry.schema.clone(), entry.batches.clone())
+        };
+
+        let mut datasets = self
+            .datasets
+            .write()
+            .map_err(|_| Error::Aborted("write conflict: store lock poisoned".to_string()))?;
+
+        datasets.insert(dst, MemoryEntry { schema, batches });
+
+        Ok(())
+    }
+
+    async fn rename(&self, src: &DataPath, dst: DataPath) -> Result<()> {
+        let mut datasets = self
+            .datasets
+            .write()
+            .map_err(|_| Error::Aborted("write conflict: store lock poisoned".to_string()))?;
+
+        let entry = datasets
+            .remove(src)
+            .ok_or_else(|| Error::NotFound(src.display()))?;
+
+        datasets.insert(dst, entry);
+
+        Ok(())
+    }
+
     async fn create_schema(&self, name: &str) -> Result<()> {
         let mut schemas = self
             .schemas
             .write()
-            .map_err(|e| Error::Internal(format!("failed to acquire write lock: {}", e)))?;
+            .map_err(|_| Error::Aborted("write conflict: store lock poisoned".to_string()))?;
 
         if !schemas.insert(name.to_string()) {
             return Err(Error::InvalidRequest(format!(
@@ -614,7 +694,7 @@ impl Store for MemoryStore {
         let mut schemas = self
             .schemas
             .write()
-            .map_err(|e| Error::Internal(format!("failed to acquire write lock: {}", e)))?;
+            .map_err(|_| Error::Aborted("write conflict: store lock poisoned".to_string()))?;
 
         Ok(schemas.remove(name))
     }
@@ -628,17 +708,32 @@ impl Store for MemoryStore {
         Ok(schemas.iter().cloned().collect())
     }
 
-    async fn schema_exists(&self, name: &str) -> bool {
-        self.schemas
+    async fn schema_exists(&self, name: &str) -> Result<bool> {
+        let schemas = self
+            .schemas
             .read()
-            .map(|s| s.contains(name))
-            .unwrap_or(false)
+            .map_err(|e| Error::Internal(format!("failed to acquire read lock: {}", e)))?;
+
+        Ok(schemas.contains(name))
+    }
+
+    async fn begin_transaction(&self) -> Result<bytes::Bytes> {
+        Ok(bytes::Bytes::new())
+    }
+
+    async fn commit_transaction(&self, _id: &bytes::Bytes) -> Result<()> {
+        Ok(())
+    }
+
+    async fn rollback_transaction(&self, _id: &bytes::Bytes) -> Result<()> {
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::TryStreamExt;
 
     fn create_test_batch(schema: SchemaRef, num_rows: i64) -> RecordBatch {
         use arrow_array::builder::Int64Builder;
@@ -663,7 +758,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_store_is_empty() {
         let store = MemoryStore::new();
-        let datasets = store.list().await.unwrap();
+        let datasets = store.list(None).await.unwrap();
         assert!(datasets.is_empty());
     }
 
@@ -710,7 +805,8 @@ mod tests {
 
         store.put(path.clone(), schema, vec![batch]).await.unwrap();
 
-        let batches = store.get_batches(&path).await.unwrap();
+        let stream = store.get_batches(&path).await.unwrap();
+        let batches: Vec<RecordBatch> = stream.try_collect().await.unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 25);
     }
@@ -731,7 +827,8 @@ mod tests {
         let info = store.get(&path).await.unwrap();
         assert_eq!(info.total_records, 25);
 
-        let batches = store.get_batches(&path).await.unwrap();
+        let stream = store.get_batches(&path).await.unwrap();
+        let batches: Vec<RecordBatch> = stream.try_collect().await.unwrap();
         assert_eq!(batches.len(), 2);
     }
 
@@ -757,8 +854,35 @@ mod tests {
             .await
             .unwrap();
 
-        let datasets = store.list().await.unwrap();
+        let datasets = store.list(None).await.unwrap();
         assert_eq!(datasets.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_with_schema_filter() {
+        let store = MemoryStore::new();
+        let schema = test_schema();
+
+        store
+            .put(
+                DataPath::from(vec!["schema_a", "t1"]),
+                schema.clone(),
+                vec![create_test_batch(schema.clone(), 5)],
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                DataPath::from(vec!["schema_b", "t2"]),
+                schema.clone(),
+                vec![create_test_batch(schema.clone(), 5)],
+            )
+            .await
+            .unwrap();
+
+        let datasets = store.list(Some("schema_a")).await.unwrap();
+        assert_eq!(datasets.len(), 1);
+        assert_eq!(datasets[0].path, DataPath::from(vec!["schema_a", "t1"]));
     }
 
     #[tokio::test]
@@ -776,7 +900,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.contains(&path).await);
+        assert!(store.contains(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -784,7 +908,7 @@ mod tests {
         let store = MemoryStore::new();
         let path = test_path();
 
-        assert!(!store.contains(&path).await);
+        assert!(!store.contains(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -802,9 +926,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.contains(&path).await);
+        assert!(store.contains(&path).await.unwrap());
         store.remove(&path).await.unwrap();
-        assert!(!store.contains(&path).await);
+        assert!(!store.contains(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -884,32 +1008,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_copy() {
+        let store = MemoryStore::new();
+        let schema = test_schema();
+        let src = test_path();
+        let dst = DataPath::from(vec!["test", "copy"]);
+
+        store
+            .put(
+                src.clone(),
+                schema.clone(),
+                vec![create_test_batch(schema, 10)],
+            )
+            .await
+            .unwrap();
+
+        store.copy(&src, dst.clone()).await.unwrap();
+
+        assert!(store.contains(&src).await.unwrap());
+        assert!(store.contains(&dst).await.unwrap());
+        assert_eq!(store.get(&dst).await.unwrap().total_records, 10);
+    }
+
+    #[tokio::test]
+    async fn test_rename() {
+        let store = MemoryStore::new();
+        let schema = test_schema();
+        let src = test_path();
+        let dst = DataPath::from(vec!["test", "renamed"]);
+
+        store
+            .put(
+                src.clone(),
+                schema.clone(),
+                vec![create_test_batch(schema, 10)],
+            )
+            .await
+            .unwrap();
+
+        store.rename(&src, dst.clone()).await.unwrap();
+
+        assert!(!store.contains(&src).await.unwrap());
+        assert!(store.contains(&dst).await.unwrap());
+        assert_eq!(store.get(&dst).await.unwrap().total_records, 10);
+    }
+
+    #[tokio::test]
+    async fn test_update_schema() {
+        let store = MemoryStore::new();
+        let path = test_path();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+        let new_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
+            Field::new("extra", DataType::Utf8, true),
+        ]));
+
+        store.put(path.clone(), schema, vec![]).await.unwrap();
+
+        store
+            .update_schema(&path, new_schema.clone())
+            .await
+            .unwrap();
+        assert_eq!(store.get_schema(&path).await.unwrap(), new_schema);
+    }
+
+    #[tokio::test]
     async fn test_with_test_fixtures_populates_data() {
         let store = MemoryStore::with_test_fixtures();
-        let datasets = store.list().await.unwrap();
+        let datasets = store.list(None).await.unwrap();
 
         assert!(datasets.len() >= 6);
         assert!(
             store
                 .contains(&DataPath::from(vec!["test", "integers"]))
                 .await
+                .unwrap()
         );
         assert!(
             store
                 .contains(&DataPath::from(vec!["test", "strings"]))
                 .await
+                .unwrap()
         );
-        assert!(store.contains(&DataPath::from(vec!["test", "empty"])).await);
+        assert!(
+            store
+                .contains(&DataPath::from(vec!["test", "empty"]))
+                .await
+                .unwrap()
+        );
         assert!(
             store
                 .contains(&DataPath::from(vec!["test", "all_types"]))
                 .await
+                .unwrap()
         );
-        assert!(store.contains(&DataPath::from(vec!["test", "large"])).await);
+        assert!(
+            store
+                .contains(&DataPath::from(vec!["test", "large"]))
+                .await
+                .unwrap()
+        );
         assert!(
             store
                 .contains(&DataPath::from(vec!["test", "nested"]))
                 .await
+                .unwrap()
         );
     }
 
@@ -937,7 +1144,6 @@ mod tests {
     #[test]
     fn test_default_creates_empty_store() {
         let store = MemoryStore::default();
-        // Check the store was created (can't call async list() in sync test)
         assert!(std::format!("{:?}", store).contains("MemoryStore"));
     }
 }

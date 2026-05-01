@@ -216,7 +216,7 @@ static SQL_INFO_DATA: LazyLock<arrow_flight::sql::metadata::SqlInfoData> = LazyL
     // Server capabilities
     builder.append(SqlInfo::FlightSqlServerReadOnly, false);
     builder.append(SqlInfo::FlightSqlServerSql, true);
-    builder.append(SqlInfo::FlightSqlServerTransaction, 1i32); // Transaction support (no savepoints)
+    builder.append(SqlInfo::FlightSqlServerTransaction, 2i32); // Transaction support with savepoints
     builder.append(SqlInfo::FlightSqlServerCancel, false);
 
     // SQL features
@@ -521,7 +521,7 @@ impl MetadataEngine {
         schema_set.insert(self.default_schema.clone());
 
         // Add schemas from table paths
-        if let Ok(datasets) = self.store.list().await {
+        if let Ok(datasets) = self.store.list(None).await {
             for dataset in &datasets {
                 let (_, schema_name, _) =
                     crate::catalog::StoreCatalog::path_to_catalog_schema_table(
@@ -590,7 +590,7 @@ impl MetadataEngine {
         // Get all datasets from store
         let datasets = self
             .store
-            .list()
+            .list(None)
             .await
             .map_err(|e| SqlError::Internal(format!("failed to list datasets: {e}")))?;
 

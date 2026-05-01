@@ -283,6 +283,15 @@ impl SagittaService {
 
     /// Inner implementation of do_exchange that works with any stream.
     /// This allows testing without tonic's Streaming type.
+    ///
+    /// Supported modes (second path segment after `exchange/`):
+    ///
+    /// - `echo` — round-trip data back to the caller unchanged.
+    /// - `store` — write incoming data to a store path
+    ///   (`exchange/store/<segment1>/<segment2>/...`). Returns a single-row
+    ///   batch with a `rows_written: i64` column.
+    /// - `query` — execute a SQL query supplied in `app_metadata` of the first
+    ///   message and stream back results.
     #[allow(clippy::result_large_err)]
     async fn do_exchange_inner<S>(&self, mut stream: S) -> Result<Vec<FlightData>, Status>
     where
@@ -361,6 +370,128 @@ impl SagittaService {
                     .try_collect()
                     .await
                     .map_err(|e| Status::internal(format!("failed to encode flight data: {e}")))?;
+
+                Ok(flight_data)
+            }
+            "store" => {
+                // Store mode: write incoming data to the path and return row count.
+                //
+                // Path format: exchange/store/<segment1>/<segment2>/...
+                // The data path is segments[2..].
+                let data_path = if segments.len() > 2 {
+                    DataPath::new(segments[2..].to_vec())
+                } else {
+                    return Err(Status::invalid_argument(
+                        "store exchange requires path: exchange/store/<data_path...>",
+                    ));
+                };
+
+                info!(path = %path.display(), data_path = %data_path.display(), "store exchange");
+
+                // Reconstruct stream with first message prepended
+                let first_stream = futures::stream::once(async { Ok(first) });
+                let rest_stream = stream.map(|r| r.map_err(|e| FlightError::Tonic(Box::new(e))));
+                let combined = first_stream
+                    .map(|r| r.map_err(|e| FlightError::Tonic(Box::new(e))))
+                    .chain(rest_stream);
+
+                let mut decoder =
+                    std::pin::pin!(FlightRecordBatchStream::new_from_flight_data(combined));
+
+                let mut batches = Vec::new();
+                while let Some(result) = decoder.as_mut().try_next().await.map_err(|e| {
+                    Status::invalid_argument(format!("failed to decode flight data: {e}"))
+                })? {
+                    batches.push(result);
+                }
+
+                let schema = decoder.schema().ok_or_else(|| {
+                    Status::invalid_argument("no schema received in flight data stream")
+                })?;
+
+                let total_records: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+                self.store
+                    .put(data_path.clone(), schema.clone(), batches)
+                    .await
+                    .map_err(Status::from)?;
+
+                info!(
+                    data_path = %data_path.display(),
+                    total_records,
+                    "store exchange: data written"
+                );
+
+                // Return a single-batch result with the row count.
+                use arrow_array::{Int64Array, RecordBatch as RB};
+                use arrow_schema::{DataType, Field, Schema};
+                let result_schema = Arc::new(Schema::new(vec![Field::new(
+                    "rows_written",
+                    DataType::Int64,
+                    false,
+                )]));
+                let count_batch = RB::try_new(
+                    result_schema.clone(),
+                    vec![Arc::new(Int64Array::from(vec![total_records as i64]))],
+                )
+                .map_err(|e| Status::internal(format!("failed to build result batch: {e}")))?;
+
+                let batch_stream = futures::stream::iter(vec![Ok::<_, FlightError>(count_batch)]);
+                let flight_data: Vec<FlightData> = FlightDataEncoderBuilder::new()
+                    .with_schema(result_schema)
+                    .build(batch_stream)
+                    .try_collect()
+                    .await
+                    .map_err(|e| Status::internal(format!("failed to encode result: {e}")))?;
+
+                Ok(flight_data)
+            }
+            "query" => {
+                // Query mode: execute SQL sent in the first message body and return results.
+                //
+                // The client sends a single FlightData whose `app_metadata` contains the
+                // SQL query as UTF-8. Results are streamed back as FlightData.
+                info!(path = %path.display(), "query exchange");
+
+                let sql = std::str::from_utf8(&first.app_metadata)
+                    .map_err(|_| {
+                        Status::invalid_argument(
+                            "query exchange: app_metadata must be valid UTF-8 SQL",
+                        )
+                    })?
+                    .trim()
+                    .to_string();
+
+                if sql.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "query exchange: app_metadata must contain a SQL query",
+                    ));
+                }
+
+                debug!(sql = %sql, "query exchange: executing SQL");
+
+                let ctx = self.sql_engine.session_ctx();
+                let df = ctx
+                    .sql(&sql)
+                    .await
+                    .map_err(|e| Status::invalid_argument(format!("invalid SQL: {e}")))?;
+
+                let schema = df.schema().inner().clone();
+                let batches = df
+                    .collect()
+                    .await
+                    .map_err(|e| Status::internal(format!("query execution failed: {e}")))?;
+
+                info!(sql = %sql, batch_count = batches.len(), "query exchange: results ready");
+
+                let batch_stream =
+                    futures::stream::iter(batches.into_iter().map(Ok::<_, FlightError>));
+                let flight_data: Vec<FlightData> = FlightDataEncoderBuilder::new()
+                    .with_schema(schema)
+                    .build(batch_stream)
+                    .try_collect()
+                    .await
+                    .map_err(|e| Status::internal(format!("failed to encode results: {e}")))?;
 
                 Ok(flight_data)
             }
@@ -1172,13 +1303,14 @@ impl FlightServiceTrait for SagittaService {
         &self,
         request: Request<Criteria>,
     ) -> Result<Response<Self::ListFlightsStream>, Status> {
+        self.authenticate_request(&request)?;
         let criteria = request.into_inner();
         debug!(expression_len = criteria.expression.len(), "list_flights");
 
         // Get all datasets from store
         let stored_datasets = self
             .store
-            .list()
+            .list(None)
             .await
             .map_err(|e| Status::internal(format!("failed to list datasets: {e}")))?;
 
@@ -1223,6 +1355,7 @@ impl FlightServiceTrait for SagittaService {
         &self,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
+        self.authenticate_request(&request)?;
         let descriptor = request.into_inner();
 
         // Handle CMD descriptors (Flight SQL commands)
@@ -1251,6 +1384,7 @@ impl FlightServiceTrait for SagittaService {
         &self,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<PollInfo>, Status> {
+        self.authenticate_request(&request)?;
         let descriptor = request.into_inner();
 
         // Handle CMD descriptors (Flight SQL commands)
@@ -1286,6 +1420,7 @@ impl FlightServiceTrait for SagittaService {
         &self,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<SchemaResult>, Status> {
+        self.authenticate_request(&request)?;
         let descriptor = request.into_inner();
 
         // Extract path from descriptor
@@ -1319,6 +1454,7 @@ impl FlightServiceTrait for SagittaService {
         &self,
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
+        self.authenticate_request(&request)?;
         let ticket = request.into_inner();
 
         // Try to parse as TicketStatementQuery (Flight SQL)
@@ -1339,18 +1475,17 @@ impl FlightServiceTrait for SagittaService {
 
         // Get schema and batches from store
         let schema = self.store.get_schema(&path).await.map_err(Status::from)?;
-        let batches = self.store.get_batches(&path).await.map_err(Status::from)?;
+        let batch_stream = self.store.get_batches(&path).await.map_err(Status::from)?;
 
-        info!(path = %path.display(), batch_count = batches.len(), "streaming data");
+        info!(path = %path.display(), "streaming data");
 
-        // Create stream of RecordBatch results
-        let batch_stream =
-            futures::stream::iter(batches.into_iter().map(|b| Ok(b.as_ref().clone())));
+        // Map datafusion errors to flight errors
+        let record_stream = batch_stream.map_err(|e| FlightError::ExternalError(Box::new(e)));
 
         // Encode as FlightData stream with schema first
         let flight_stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(batch_stream)
+            .build(record_stream)
             .map(|result| result.map_err(|e| Status::internal(format!("encoding error: {e}"))));
 
         Ok(Response::new(Box::pin(flight_stream)))
@@ -1398,6 +1533,11 @@ impl FlightServiceTrait for SagittaService {
         &self,
         request: Request<Action>,
     ) -> Result<Response<Self::DoActionStream>, Status> {
+        // healthcheck is intentionally unauthenticated for liveness/readiness probes
+        let action_type = request.get_ref().r#type.clone();
+        if action_type != "healthcheck" {
+            self.authenticate_request(&request)?;
+        }
         let action = request.into_inner();
 
         debug!(action_type = %action.r#type, body_len = action.body.len(), "do_action");
@@ -1508,7 +1648,7 @@ impl FlightServiceTrait for SagittaService {
                     })?;
 
                 // Begin the transaction
-                let transaction_id = self.sql_engine.begin_transaction()?;
+                let transaction_id = self.sql_engine.begin_transaction().await?;
 
                 // Encode the response
                 let response = ActionBeginTransactionResult {
@@ -1555,7 +1695,8 @@ impl FlightServiceTrait for SagittaService {
 
                 // End the transaction
                 self.sql_engine
-                    .end_transaction(&request.transaction_id, action)?;
+                    .end_transaction(&request.transaction_id, action)
+                    .await?;
 
                 info!(
                     transaction_id = %String::from_utf8_lossy(&request.transaction_id),
@@ -1789,6 +1930,33 @@ mod tests {
             password: password.to_string(),
         };
         bytes::Bytes::from(auth.encode_to_vec())
+    }
+
+    /// Add a bearer token to an existing request.
+    fn add_token<T>(mut request: Request<T>, token: &crate::AuthToken) -> Request<T> {
+        use tonic::metadata::MetadataValue;
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from(format!("Bearer {token}")).unwrap(),
+        );
+        request
+    }
+
+    /// Create a `SagittaService` backed by the given store and shared test user store,
+    /// and return both with a valid admin token for that service.
+    async fn service_with_auth(
+        store: Arc<dyn crate::Store>,
+    ) -> (SagittaService, Arc<InMemoryUserStore>, crate::AuthToken) {
+        let user_store = Arc::new(InMemoryUserStore::with_test_users());
+        let admin = user_store.authenticate("admin", "admin123").unwrap();
+        let token = user_store.create_token(&admin);
+        let service = SagittaService::with_user_store(store, user_store.clone()).await;
+        (service, user_store, token)
+    }
+
+    /// Create an authenticated `Request` wrapping `inner` using `token`.
+    fn token_request<T>(inner: T, token: &crate::AuthToken) -> Request<T> {
+        add_token(Request::new(inner), token)
     }
 
     #[test]
@@ -2034,10 +2202,9 @@ mod tests {
         use futures::StreamExt;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
-        let criteria = Criteria::default();
-        let request = Request::new(criteria);
+        let request = token_request(Criteria::default(), &token);
 
         let response = service.list_flights(request).await.unwrap();
         let flights: Vec<FlightInfo> = response
@@ -2081,10 +2248,9 @@ mod tests {
         use futures::StreamExt;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
-        let criteria = Criteria::default();
-        let request = Request::new(criteria);
+        let request = token_request(Criteria::default(), &token);
 
         let response = service.list_flights(request).await.unwrap();
         let flights: Vec<FlightInfo> = response
@@ -2119,13 +2285,15 @@ mod tests {
         use futures::StreamExt;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Filter for "integers"
-        let criteria = Criteria {
-            expression: bytes::Bytes::from("integers"),
-        };
-        let request = Request::new(criteria);
+        let request = token_request(
+            Criteria {
+                expression: bytes::Bytes::from("integers"),
+            },
+            &token,
+        );
 
         let response = service.list_flights(request).await.unwrap();
         let flights: Vec<FlightInfo> = response
@@ -2148,13 +2316,15 @@ mod tests {
         use futures::StreamExt;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Filter for "test/" prefix to get all test fixtures
-        let criteria = Criteria {
-            expression: bytes::Bytes::from("test/"),
-        };
-        let request = Request::new(criteria);
+        let request = token_request(
+            Criteria {
+                expression: bytes::Bytes::from("test/"),
+            },
+            &token,
+        );
 
         let response = service.list_flights(request).await.unwrap();
         let flights: Vec<FlightInfo> = response
@@ -2175,13 +2345,15 @@ mod tests {
         use futures::StreamExt;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Filter for something that doesn't exist
-        let criteria = Criteria {
-            expression: bytes::Bytes::from("nonexistent"),
-        };
-        let request = Request::new(criteria);
+        let request = token_request(
+            Criteria {
+                expression: bytes::Bytes::from("nonexistent"),
+            },
+            &token,
+        );
 
         let response = service.list_flights(request).await.unwrap();
         let flights: Vec<FlightInfo> = response
@@ -2201,13 +2373,14 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let descriptor =
             FlightDescriptor::new_path(vec!["test".to_string(), "integers".to_string()]);
-        let request = Request::new(descriptor);
-
-        let response = service.get_flight_info(request).await.unwrap();
+        let response = service
+            .get_flight_info(token_request(descriptor, &token))
+            .await
+            .unwrap();
         let info = response.into_inner();
 
         // Verify descriptor matches
@@ -2227,13 +2400,13 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let descriptor =
             FlightDescriptor::new_path(vec!["nonexistent".to_string(), "path".to_string()]);
-        let request = Request::new(descriptor);
-
-        let result = service.get_flight_info(request).await;
+        let result = service
+            .get_flight_info(token_request(descriptor, &token))
+            .await;
         assert!(result.is_err());
 
         let status = result.unwrap_err();
@@ -2245,12 +2418,12 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let descriptor = FlightDescriptor::new_cmd("SELECT * FROM test");
-        let request = Request::new(descriptor);
-
-        let result = service.get_flight_info(request).await;
+        let result = service
+            .get_flight_info(token_request(descriptor, &token))
+            .await;
         assert!(result.is_err());
 
         let status = result.unwrap_err();
@@ -2263,13 +2436,14 @@ mod tests {
         use arrow_schema::Schema;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let descriptor =
             FlightDescriptor::new_path(vec!["test".to_string(), "integers".to_string()]);
-        let request = Request::new(descriptor);
-
-        let response = service.get_schema(request).await.unwrap();
+        let response = service
+            .get_schema(token_request(descriptor, &token))
+            .await
+            .unwrap();
         let result = response.into_inner();
 
         // Verify schema can be decoded
@@ -2284,21 +2458,21 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let descriptor =
             FlightDescriptor::new_path(vec!["test".to_string(), "integers".to_string()]);
 
         // Get schema via get_schema
         let schema_response = service
-            .get_schema(Request::new(descriptor.clone()))
+            .get_schema(token_request(descriptor.clone(), &token))
             .await
             .unwrap();
         let schema_result = schema_response.into_inner();
 
         // Get schema via get_flight_info
         let info_response = service
-            .get_flight_info(Request::new(descriptor))
+            .get_flight_info(token_request(descriptor, &token))
             .await
             .unwrap();
         let flight_info = info_response.into_inner();
@@ -2312,13 +2486,11 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let descriptor =
             FlightDescriptor::new_path(vec!["nonexistent".to_string(), "path".to_string()]);
-        let request = Request::new(descriptor);
-
-        let result = service.get_schema(request).await;
+        let result = service.get_schema(token_request(descriptor, &token)).await;
         assert!(result.is_err());
 
         let status = result.unwrap_err();
@@ -2333,13 +2505,11 @@ mod tests {
         use futures::TryStreamExt;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Create ticket from path
         let ticket = Ticket::new("test/integers".as_bytes().to_vec());
-        let request = Request::new(ticket);
-
-        let response = service.do_get(request).await.unwrap();
+        let response = service.do_get(token_request(ticket, &token)).await.unwrap();
         let stream = response.into_inner();
 
         // Map Status error to FlightError for decoder
@@ -2361,12 +2531,10 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let ticket = Ticket::new("test/integers".as_bytes().to_vec());
-        let request = Request::new(ticket);
-
-        let response = service.do_get(request).await.unwrap();
+        let response = service.do_get(token_request(ticket, &token)).await.unwrap();
         let mut stream = response.into_inner();
 
         // First message should contain schema (non-empty data_header)
@@ -2385,12 +2553,10 @@ mod tests {
         use futures::TryStreamExt;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let ticket = Ticket::new("test/empty".as_bytes().to_vec());
-        let request = Request::new(ticket);
-
-        let response = service.do_get(request).await.unwrap();
+        let response = service.do_get(token_request(ticket, &token)).await.unwrap();
         let stream = response.into_inner();
 
         // Map Status error to FlightError for decoder
@@ -2409,12 +2575,10 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let ticket = Ticket::new("nonexistent/path".as_bytes().to_vec());
-        let request = Request::new(ticket);
-
-        let result = service.do_get(request).await;
+        let result = service.do_get(token_request(ticket, &token)).await;
 
         // Should return error before stream creation
         match result {
@@ -2465,7 +2629,7 @@ mod tests {
 
         // Verify data was stored
         let path = DataPath::from(vec!["put", "test"]);
-        assert!(store.contains(&path).await);
+        assert!(store.contains(&path).await.unwrap());
 
         let info = store.get(&path).await.unwrap();
         assert_eq!(info.total_records, 3);
@@ -2482,7 +2646,7 @@ mod tests {
         use futures::{StreamExt, TryStreamExt};
 
         let store = Arc::new(MemoryStore::new());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Create test data
         let schema = Arc::new(Schema::new(vec![
@@ -2519,7 +2683,7 @@ mod tests {
 
         // Get data back
         let ticket = Ticket::new("roundtrip".as_bytes().to_vec());
-        let response = service.do_get(Request::new(ticket)).await.unwrap();
+        let response = service.do_get(token_request(ticket, &token)).await.unwrap();
         let stream = response
             .into_inner()
             .map(|r| r.map_err(|e| FlightError::Tonic(Box::new(e))));
@@ -2645,15 +2809,20 @@ mod tests {
         use futures::StreamExt;
 
         let store = Arc::new(MemoryStore::new());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         let body = bytes::Bytes::from("hello world");
-        let action = Action {
-            r#type: "echo".to_string(),
-            body: body.clone(),
-        };
 
-        let response = service.do_action(Request::new(action)).await.unwrap();
+        let response = service
+            .do_action(token_request(
+                Action {
+                    r#type: "echo".to_string(),
+                    body: body.clone(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap();
         let results: Vec<arrow_flight::Result> = response
             .into_inner()
             .collect::<Vec<_>>()
@@ -2671,14 +2840,17 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::new());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
-        let action = Action {
-            r#type: "error".to_string(),
-            body: bytes::Bytes::new(),
-        };
-
-        let result = service.do_action(Request::new(action)).await;
+        let result = service
+            .do_action(token_request(
+                Action {
+                    r#type: "error".to_string(),
+                    body: bytes::Bytes::new(),
+                },
+                &token,
+            ))
+            .await;
         match result {
             Ok(_) => panic!("expected error"),
             Err(status) => assert_eq!(status.code(), tonic::Code::Internal),
@@ -2690,14 +2862,17 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::new());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
-        let action = Action {
-            r#type: "unknown_action".to_string(),
-            body: bytes::Bytes::new(),
-        };
-
-        let result = service.do_action(Request::new(action)).await;
+        let result = service
+            .do_action(token_request(
+                Action {
+                    r#type: "unknown_action".to_string(),
+                    body: bytes::Bytes::new(),
+                },
+                &token,
+            ))
+            .await;
         match result {
             Ok(_) => panic!("expected error"),
             Err(status) => assert_eq!(status.code(), tonic::Code::InvalidArgument),
@@ -2711,7 +2886,7 @@ mod tests {
         use futures::StreamExt;
 
         let store = Arc::new(MemoryStore::new());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Create a minimal FlightInfo to cancel
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
@@ -2722,12 +2897,17 @@ mod tests {
 
         // Create the cancel request
         let request = CancelFlightInfoRequest::new(flight_info);
-        let action = Action {
-            r#type: "CancelFlightInfo".to_string(),
-            body: request.encode_to_vec().into(),
-        };
 
-        let response = service.do_action(Request::new(action)).await.unwrap();
+        let response = service
+            .do_action(token_request(
+                Action {
+                    r#type: "CancelFlightInfo".to_string(),
+                    body: request.encode_to_vec().into(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap();
         let results: Vec<arrow_flight::Result> = response
             .into_inner()
             .collect::<Vec<_>>()
@@ -2952,7 +3132,7 @@ mod tests {
         use arrow_flight::sql::{CommandStatementQuery, ProstMessageExt};
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Create a CommandStatementQuery command
         let cmd = CommandStatementQuery {
@@ -2962,10 +3142,11 @@ mod tests {
         let any = cmd.as_any();
         let cmd_bytes = any.encode_to_vec();
 
-        let descriptor = FlightDescriptor::new_cmd(cmd_bytes);
-        let request = Request::new(descriptor);
-
-        let response = service.get_flight_info(request).await.unwrap();
+        let descriptor = FlightDescriptor::new_cmd(cmd_bytes.clone());
+        let response = service
+            .get_flight_info(token_request(descriptor, &token))
+            .await
+            .unwrap();
         let info = response.into_inner();
 
         // Verify we have an endpoint with a ticket
@@ -2988,7 +3169,7 @@ mod tests {
         use arrow_flight::sql::{CommandStatementQuery, ProstMessageExt};
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Query for non-existent table
         let cmd = CommandStatementQuery {
@@ -2999,9 +3180,9 @@ mod tests {
         let cmd_bytes = any.encode_to_vec();
 
         let descriptor = FlightDescriptor::new_cmd(cmd_bytes);
-        let request = Request::new(descriptor);
-
-        let result = service.get_flight_info(request).await;
+        let result = service
+            .get_flight_info(token_request(descriptor, &token))
+            .await;
         assert!(result.is_err());
 
         let status = result.unwrap_err();
@@ -3016,7 +3197,7 @@ mod tests {
         use futures::TryStreamExt;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // First get flight info to get a ticket
         let cmd = CommandStatementQuery {
@@ -3027,14 +3208,15 @@ mod tests {
         let cmd_bytes = any.encode_to_vec();
 
         let descriptor = FlightDescriptor::new_cmd(cmd_bytes);
-        let request = Request::new(descriptor);
-
-        let info = service.get_flight_info(request).await.unwrap().into_inner();
+        let info = service
+            .get_flight_info(token_request(descriptor, &token))
+            .await
+            .unwrap()
+            .into_inner();
         let ticket = info.endpoint[0].ticket.clone().unwrap();
 
         // Now use the ticket with do_get
-        let request = Request::new(ticket);
-        let response = service.do_get(request).await.unwrap();
+        let response = service.do_get(token_request(ticket, &token)).await.unwrap();
         let stream = response.into_inner();
 
         // Collect all flight data
@@ -3049,14 +3231,15 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Poll for test/integers path
         let descriptor =
             FlightDescriptor::new_path(vec!["test".to_string(), "integers".to_string()]);
-        let request = Request::new(descriptor);
-
-        let response = service.poll_flight_info(request).await.unwrap();
+        let response = service
+            .poll_flight_info(token_request(descriptor, &token))
+            .await
+            .unwrap();
         let poll_info = response.into_inner();
 
         // Query is complete (no flight_descriptor for retry)
@@ -3076,7 +3259,7 @@ mod tests {
         use arrow_flight::sql::{CommandStatementQuery, ProstMessageExt};
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Poll for a Flight SQL query
         let cmd = CommandStatementQuery {
@@ -3087,9 +3270,10 @@ mod tests {
         let cmd_bytes = any.encode_to_vec();
 
         let descriptor = FlightDescriptor::new_cmd(cmd_bytes);
-        let request = Request::new(descriptor);
-
-        let response = service.poll_flight_info(request).await.unwrap();
+        let response = service
+            .poll_flight_info(token_request(descriptor, &token))
+            .await
+            .unwrap();
         let poll_info = response.into_inner();
 
         // Query is complete
@@ -3107,13 +3291,13 @@ mod tests {
         use crate::MemoryStore;
 
         let store = Arc::new(MemoryStore::with_test_fixtures());
-        let service = SagittaService::new(store).await;
+        let (service, _, token) = service_with_auth(store).await;
 
         // Poll for non-existent path
         let descriptor = FlightDescriptor::new_path(vec!["nonexistent".to_string()]);
-        let request = Request::new(descriptor);
-
-        let result = service.poll_flight_info(request).await;
+        let result = service
+            .poll_flight_info(token_request(descriptor, &token))
+            .await;
         assert!(result.is_err());
 
         let status = result.unwrap_err();
@@ -3168,16 +3352,19 @@ mod tests {
         use futures::StreamExt;
 
         let store = Arc::new(MemoryStore::new());
-        let service = SagittaService::new(store)
+        let (service, _, token) = service_with_auth(store).await;
+        let service = service.register_action(Arc::new(UppercaseAction));
+
+        let response = service
+            .do_action(token_request(
+                Action {
+                    r#type: "uppercase".to_string(),
+                    body: bytes::Bytes::from("hello world"),
+                },
+                &token,
+            ))
             .await
-            .register_action(Arc::new(UppercaseAction));
-
-        let action = Action {
-            r#type: "uppercase".to_string(),
-            body: bytes::Bytes::from("hello world"),
-        };
-
-        let response = service.do_action(Request::new(action)).await.unwrap();
+            .unwrap();
         let results: Vec<arrow_flight::Result> = response
             .into_inner()
             .collect::<Vec<_>>()

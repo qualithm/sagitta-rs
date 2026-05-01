@@ -1,5 +1,7 @@
 //! Configuration for Sagitta.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 use std::path::Path;
 
@@ -33,6 +35,12 @@ pub struct Config {
     /// Whether to load test fixtures on startup.
     #[serde(default)]
     pub enable_test_fixtures: bool,
+
+    /// Arbitrary key-value options forwarded to the storage backend.
+    ///
+    /// The meaning of each key is backend-specific; unknown keys are ignored.
+    #[serde(default)]
+    pub store_options: HashMap<String, String>,
 }
 
 /// TLS configuration.
@@ -138,6 +146,7 @@ impl Default for Config {
             catalog_name: default_catalog_name(),
             default_schema: default_schema_name(),
             enable_test_fixtures: false,
+            store_options: HashMap::new(),
         }
     }
 }

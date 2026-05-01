@@ -76,19 +76,37 @@ impl TableProvider for StoreTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        let proj_slice = projection.map(|v| v.as_slice());
+
+        // Fetch only the projected columns from the store (pushdown).
+        // An empty projection (e.g. COUNT(*)) would produce zero-column batches that
+        // some Arrow implementations reject, so fall back to a full scan in that case.
+        let effective_proj = proj_slice.filter(|p| !p.is_empty());
         let batches = self
             .store
-            .get_batches(&self.path)
+            .scan_with_limit(&self.path, effective_proj, limit)
             .await
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
         // Convert Arc<RecordBatch> to owned RecordBatch
         let batches: Vec<RecordBatch> = batches.iter().map(|b| b.as_ref().clone()).collect();
 
-        // Use MemTable to handle the execution plan creation
-        let mem_table = MemTable::try_new(self.schema.clone(), vec![batches])?;
+        // Compute the schema after projection so MemTable is consistent.
+        // When the effective projection differs from what was requested (empty proj case),
+        // use the full schema and let MemTable re-apply the original projection.
+        let (mem_schema, mem_projection) = if effective_proj != proj_slice {
+            (self.schema.clone(), projection)
+        } else {
+            let projected_schema = match projection {
+                Some(proj) => Arc::new(self.schema.project(proj)?),
+                None => self.schema.clone(),
+            };
+            (projected_schema, None)
+        };
 
-        mem_table.scan(state, projection, filters, limit).await
+        // Use MemTable for filter and limit pushdown.
+        let mem_table = MemTable::try_new(mem_schema, vec![batches])?;
+        mem_table.scan(state, mem_projection, filters, limit).await
     }
 }
 
