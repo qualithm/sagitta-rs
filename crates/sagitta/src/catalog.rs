@@ -39,7 +39,7 @@ impl StoreCatalog {
             HashMap::new();
 
         // Group tables by catalog and schema
-        if let Ok(datasets) = store.list().await {
+        if let Ok(datasets) = store.list(None).await {
             for dataset in datasets {
                 let (cat, schema, table) =
                     Self::path_to_catalog_schema_table(&dataset.path, catalog_name, default_schema);

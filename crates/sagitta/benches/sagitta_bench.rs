@@ -87,7 +87,7 @@ fn bench_store_list(c: &mut Criterion) {
 
     c.bench_function("store_list", |b| {
         b.to_async(&rt).iter(|| async {
-            let datasets = store.list().await.unwrap();
+            let datasets = store.list(None).await.unwrap();
             black_box(datasets);
         })
     });
