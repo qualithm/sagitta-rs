@@ -365,6 +365,11 @@ mod tests {
             }
         }
 
+        let action = NoopAction;
+        assert_eq!(action.action_type(), "noop");
+        assert_eq!(action.description(), "does nothing");
+        assert!(action.execute(Bytes::new()).unwrap().is_empty());
+
         let sagitta = Sagitta::builder().action(Arc::new(NoopAction));
         assert_eq!(sagitta.custom_actions.len(), 1);
     }
