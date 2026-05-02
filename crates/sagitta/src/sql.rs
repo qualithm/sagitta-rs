@@ -6137,4 +6137,133 @@ mod tests {
         let result = engine.get_savepoint_count(&txn_id);
         assert!(matches!(result, Err(SqlError::TransactionNotFound(_))));
     }
+
+    // ===== Additional schema/view error path tests =====
+
+    #[tokio::test]
+    async fn test_create_schema_duplicate_error() {
+        let engine = create_test_engine().await;
+
+        let cmd = CommandStatementUpdate {
+            query: "CREATE SCHEMA dupschema".to_string(),
+            transaction_id: None,
+        };
+        engine.execute_statement_update(&cmd).await.unwrap();
+
+        let cmd2 = CommandStatementUpdate {
+            query: "CREATE SCHEMA dupschema".to_string(),
+            transaction_id: None,
+        };
+        let result = engine.execute_statement_update(&cmd2).await;
+        assert!(matches!(result, Err(SqlError::TableAlreadyExists(_))));
+    }
+
+    #[tokio::test]
+    async fn test_drop_schema_not_found_error() {
+        let engine = create_test_engine().await;
+
+        let cmd = CommandStatementUpdate {
+            query: "DROP SCHEMA nosuchschema".to_string(),
+            transaction_id: None,
+        };
+        let result = engine.execute_statement_update(&cmd).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_or_replace_view() {
+        let engine = create_test_engine().await;
+
+        let cmd = CommandStatementUpdate {
+            query: "CREATE VIEW v1 AS SELECT id FROM test.\"table\"".to_string(),
+            transaction_id: None,
+        };
+        engine.execute_statement_update(&cmd).await.unwrap();
+
+        let cmd2 = CommandStatementUpdate {
+            query: "CREATE OR REPLACE VIEW v1 AS SELECT id FROM test.\"table\"".to_string(),
+            transaction_id: None,
+        };
+        assert!(engine.execute_statement_update(&cmd2).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_view_already_exists_error() {
+        let engine = create_test_engine().await;
+
+        let cmd = CommandStatementUpdate {
+            query: "CREATE VIEW dupview AS SELECT id FROM test.\"table\"".to_string(),
+            transaction_id: None,
+        };
+        engine.execute_statement_update(&cmd).await.unwrap();
+
+        let cmd2 = CommandStatementUpdate {
+            query: "CREATE VIEW dupview AS SELECT id FROM test.\"table\"".to_string(),
+            transaction_id: None,
+        };
+        let result = engine.execute_statement_update(&cmd2).await;
+        assert!(matches!(result, Err(SqlError::TableAlreadyExists(_))));
+    }
+
+    #[tokio::test]
+    async fn test_drop_view_not_found_error() {
+        let engine = create_test_engine().await;
+
+        let cmd = CommandStatementUpdate {
+            query: "DROP VIEW nosuchview".to_string(),
+            transaction_id: None,
+        };
+        let result = engine.execute_statement_update(&cmd).await;
+        assert!(matches!(result, Err(SqlError::TableNotFound(_))));
+    }
+
+    // ===== SqlError to tonic::Status conversion tests =====
+
+    #[test]
+    fn test_sql_error_to_status_conversions() {
+        use tonic::Status;
+
+        let cases: Vec<(SqlError, tonic::Code)> = vec![
+            (
+                SqlError::InvalidCommand("bad".into()),
+                tonic::Code::InvalidArgument,
+            ),
+            (
+                SqlError::UnsupportedCommand("x".into()),
+                tonic::Code::Unimplemented,
+            ),
+            (
+                SqlError::SyntaxError("s".into()),
+                tonic::Code::InvalidArgument,
+            ),
+            (SqlError::TableNotFound("t".into()), tonic::Code::NotFound),
+            (
+                SqlError::TableAlreadyExists("t".into()),
+                tonic::Code::AlreadyExists,
+            ),
+            (
+                SqlError::PreparedStatementNotFound("p".into()),
+                tonic::Code::NotFound,
+            ),
+            (
+                SqlError::TransactionNotFound("x".into()),
+                tonic::Code::NotFound,
+            ),
+            (
+                SqlError::SavepointNotFound("x".into()),
+                tonic::Code::NotFound,
+            ),
+            (
+                SqlError::InvalidTransactionAction("x".into()),
+                tonic::Code::InvalidArgument,
+            ),
+            (SqlError::Internal("x".into()), tonic::Code::Internal),
+            (SqlError::QueryExecution("q".into()), tonic::Code::Internal),
+        ];
+
+        for (err, expected_code) in cases {
+            let status: Status = err.into();
+            assert_eq!(status.code(), expected_code);
+        }
+    }
 }

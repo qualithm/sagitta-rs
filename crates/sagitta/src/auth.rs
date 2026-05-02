@@ -328,4 +328,79 @@ mod tests {
         let user = store.authenticate("admin", "admin123").unwrap();
         assert!(user.can_write());
     }
+
+    #[test]
+    fn test_auth_token_new_and_as_str() {
+        let token = AuthToken::new("my-token-value");
+        assert_eq!(token.as_str(), "my-token-value");
+    }
+
+    #[test]
+    fn test_auth_token_as_bytes() {
+        let token = AuthToken::new("hello");
+        assert_eq!(token.as_bytes(), b"hello");
+    }
+
+    #[test]
+    fn test_auth_token_display() {
+        let token = AuthToken::new("display-token");
+        assert_eq!(format!("{token}"), "display-token");
+    }
+
+    #[test]
+    fn test_auth_token_equality() {
+        let t1 = AuthToken::new("same");
+        let t2 = AuthToken::new("same");
+        assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn test_add_user() {
+        let mut store = InMemoryUserStore::new();
+        store.add_user("alice", "secret", AccessLevel::FullAccess);
+        let user = store.authenticate("alice", "secret");
+        assert!(user.is_some());
+        assert_eq!(user.unwrap().username, "alice");
+    }
+
+    #[test]
+    fn test_with_token_ttl_zero_tokens_never_expire() {
+        let store = InMemoryUserStore::with_token_ttl(0);
+        // Add a user manually
+        let mut store = store;
+        store.add_user("user", "pass", AccessLevel::ReadOnly);
+
+        let user = store.authenticate("user", "pass").unwrap();
+        let token = store.create_token(&user);
+
+        // With TTL=0, token should always be valid
+        let looked_up = store.user_for_token(&token);
+        assert!(looked_up.is_some());
+        assert_eq!(looked_up.unwrap().username, "user");
+    }
+
+    #[test]
+    fn test_invalid_token_returns_none() {
+        let store = InMemoryUserStore::with_test_users();
+        let bad_token = AuthToken::new("nonexistent-token");
+        assert!(store.user_for_token(&bad_token).is_none());
+    }
+
+    #[test]
+    fn test_arc_user_store_authenticate_delegates() {
+        use std::sync::Arc;
+        let store = Arc::new(InMemoryUserStore::with_test_users());
+        let user = store.authenticate("admin", "admin123");
+        assert!(user.is_some());
+    }
+
+    #[test]
+    fn test_arc_user_store_create_token_delegates() {
+        use std::sync::Arc;
+        let store = Arc::new(InMemoryUserStore::with_test_users());
+        let user = store.authenticate("reader", "reader123").unwrap();
+        let token = store.create_token(&user);
+        let looked_up = store.user_for_token(&token);
+        assert!(looked_up.is_some());
+    }
 }

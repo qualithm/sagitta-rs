@@ -1250,4 +1250,181 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn test_table_types_handle_roundtrip() {
+        let query = MetadataQuery::GetTableTypes;
+        let handle = query.to_handle();
+        let parsed = MetadataQuery::from_handle(&handle).unwrap();
+        assert!(matches!(parsed, MetadataQuery::GetTableTypes));
+    }
+
+    #[test]
+    fn test_primary_keys_handle_roundtrip() {
+        let query = MetadataQuery::GetPrimaryKeys {
+            catalog: None,
+            db_schema: None,
+            table: "t".to_string(),
+        };
+        let handle = query.to_handle();
+        let parsed = MetadataQuery::from_handle(&handle).unwrap();
+        assert!(matches!(parsed, MetadataQuery::GetPrimaryKeys { .. }));
+    }
+
+    #[test]
+    fn test_exported_keys_handle_roundtrip() {
+        let query = MetadataQuery::GetExportedKeys {
+            catalog: None,
+            db_schema: None,
+            table: "t".to_string(),
+        };
+        let handle = query.to_handle();
+        let parsed = MetadataQuery::from_handle(&handle).unwrap();
+        assert!(matches!(parsed, MetadataQuery::GetExportedKeys { .. }));
+    }
+
+    #[test]
+    fn test_imported_keys_handle_roundtrip() {
+        let query = MetadataQuery::GetImportedKeys {
+            catalog: None,
+            db_schema: None,
+            table: "t".to_string(),
+        };
+        let handle = query.to_handle();
+        let parsed = MetadataQuery::from_handle(&handle).unwrap();
+        assert!(matches!(parsed, MetadataQuery::GetImportedKeys { .. }));
+    }
+
+    #[test]
+    fn test_cross_reference_handle_roundtrip() {
+        let query = MetadataQuery::GetCrossReference {
+            pk_catalog: None,
+            pk_db_schema: None,
+            pk_table: "pk".to_string(),
+            fk_catalog: None,
+            fk_db_schema: None,
+            fk_table: "fk".to_string(),
+        };
+        let handle = query.to_handle();
+        let parsed = MetadataQuery::from_handle(&handle).unwrap();
+        assert!(matches!(parsed, MetadataQuery::GetCrossReference { .. }));
+    }
+
+    #[test]
+    fn test_sql_info_handle_roundtrip() {
+        let query = MetadataQuery::GetSqlInfo { info: vec![1, 2] };
+        let handle = query.to_handle();
+        let parsed = MetadataQuery::from_handle(&handle).unwrap();
+        assert!(matches!(parsed, MetadataQuery::GetSqlInfo { .. }));
+    }
+
+    #[test]
+    fn test_xdbc_type_info_handle_roundtrip() {
+        let query = MetadataQuery::GetXdbcTypeInfo { data_type: None };
+        let handle = query.to_handle();
+        let parsed = MetadataQuery::from_handle(&handle).unwrap();
+        assert!(matches!(parsed, MetadataQuery::GetXdbcTypeInfo { .. }));
+    }
+
+    #[test]
+    fn test_from_handle_unknown_returns_none() {
+        let parsed = MetadataQuery::from_handle(&bytes::Bytes::from("meta_unknown_xyz"));
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn test_get_table_types() {
+        let engine = create_test_engine();
+        let (schema, batches) = engine.get_table_types().unwrap();
+        assert_eq!(schema.fields().len(), 1);
+        assert_eq!(schema.field(0).name(), "table_type");
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0].num_rows() > 0);
+    }
+
+    #[test]
+    fn test_get_primary_keys() {
+        let engine = create_test_engine();
+        let (schema, batches) = engine.get_primary_keys(&None, &None, "t").unwrap();
+        assert_eq!(schema.fields().len(), 6);
+        assert_eq!(batches[0].num_rows(), 0);
+    }
+
+    #[test]
+    fn test_get_exported_keys() {
+        let engine = create_test_engine();
+        let (schema, batches) = engine.get_exported_keys(&None, &None, "t").unwrap();
+        assert_eq!(schema.fields().len(), 13);
+        assert_eq!(batches[0].num_rows(), 0);
+    }
+
+    #[test]
+    fn test_get_imported_keys() {
+        let engine = create_test_engine();
+        let (schema, batches) = engine.get_imported_keys(&None, &None, "t").unwrap();
+        assert_eq!(schema.fields().len(), 13);
+        assert_eq!(batches[0].num_rows(), 0);
+    }
+
+    #[test]
+    fn test_get_cross_reference() {
+        let engine = create_test_engine();
+        let (schema, batches) = engine
+            .get_cross_reference(&None, &None, "pk", &None, &None, "fk")
+            .unwrap();
+        assert_eq!(schema.fields().len(), 13);
+        assert_eq!(batches[0].num_rows(), 0);
+    }
+
+    #[test]
+    fn test_get_sql_info() {
+        let engine = create_test_engine();
+        let (schema, batches) = engine.get_sql_info(&[]).unwrap();
+        assert!(!schema.fields().is_empty());
+        assert!(!batches.is_empty());
+    }
+
+    #[test]
+    fn test_get_xdbc_type_info_all() {
+        let engine = create_test_engine();
+        let (schema, batches) = engine.get_xdbc_type_info(None).unwrap();
+        assert!(!schema.fields().is_empty());
+        assert!(batches[0].num_rows() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_metadata_query_table_types() {
+        let engine = create_test_engine();
+        let query = MetadataQuery::GetTableTypes;
+        let (_, batches) = engine.execute_metadata_query(&query).await.unwrap();
+        assert!(!batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_metadata_query_primary_keys() {
+        let engine = create_test_engine();
+        let query = MetadataQuery::GetPrimaryKeys {
+            catalog: None,
+            db_schema: None,
+            table: "t".to_string(),
+        };
+        let (_, batches) = engine.execute_metadata_query(&query).await.unwrap();
+        assert_eq!(batches[0].num_rows(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_metadata_query_sql_info() {
+        let engine = create_test_engine();
+        let query = MetadataQuery::GetSqlInfo { info: vec![] };
+        let (_, batches) = engine.execute_metadata_query(&query).await.unwrap();
+        assert!(!batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_metadata_query_xdbc_type_info() {
+        let engine = create_test_engine();
+        let query = MetadataQuery::GetXdbcTypeInfo { data_type: None };
+        let (_, batches) = engine.execute_metadata_query(&query).await.unwrap();
+        assert!(batches[0].num_rows() > 0);
+    }
 }
