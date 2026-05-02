@@ -880,6 +880,27 @@ impl SqlEngine {
 
                         Ok((path, deleted_count))
                     }
+                    WriteOp::Truncate => {
+                        let info = self
+                            .store
+                            .get(&path)
+                            .await
+                            .map_err(|_| SqlError::TableNotFound(path.display()))?;
+                        let old_count = info.total_records as i64;
+
+                        self.store
+                            .truncate(&path)
+                            .await
+                            .map_err(|e| SqlError::Internal(e.to_string()))?;
+
+                        info!(
+                            path = %path.display(),
+                            record_count = old_count,
+                            "TRUNCATE executed via DataFusion"
+                        );
+
+                        Ok((path, old_count))
+                    }
                 }
             }
             LogicalPlan::Ddl(ddl) => self.execute_ddl(ddl).await,

@@ -17,4 +17,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 anyhow = "1"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-datafusion = "52"
+datafusion = "53"
