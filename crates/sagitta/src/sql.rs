@@ -617,11 +617,6 @@ impl SqlEngine {
     async fn parse_and_execute_update_async(&self, query: &str) -> SqlResult<(DataPath, i64)> {
         let query_upper = query.trim().to_uppercase();
 
-        // Handle TRUNCATE TABLE (not supported by DataFusion)
-        if query_upper.starts_with("TRUNCATE") {
-            return self.execute_truncate(query).await;
-        }
-
         // Handle ALTER TABLE (not supported by DataFusion)
         if query_upper.starts_with("ALTER") {
             return self.execute_alter_table(query).await;
@@ -879,6 +874,27 @@ impl SqlEngine {
                         );
 
                         Ok((path, deleted_count))
+                    }
+                    WriteOp::Truncate => {
+                        let info = self
+                            .store
+                            .get(&path)
+                            .await
+                            .map_err(|_| SqlError::TableNotFound(path.display()))?;
+                        let old_count = info.total_records as i64;
+
+                        self.store
+                            .truncate(&path)
+                            .await
+                            .map_err(|e| SqlError::Internal(e.to_string()))?;
+
+                        info!(
+                            path = %path.display(),
+                            record_count = old_count,
+                            "TRUNCATE executed via DataFusion"
+                        );
+
+                        Ok((path, old_count))
                     }
                 }
             }
@@ -1224,59 +1240,6 @@ impl SqlEngine {
             LogicalPlan::SubqueryAlias(alias) => self.plan_has_filter(alias.input.as_ref()),
             _ => false,
         }
-    }
-
-    /// Parse and execute an update statement (INSERT, UPDATE, DELETE).
-    ///
-    /// Execute a TRUNCATE TABLE statement.
-    ///
-    /// Format: TRUNCATE [TABLE] table_name
-    /// Removes all rows but keeps the table schema.
-    async fn execute_truncate(&self, query: &str) -> SqlResult<(DataPath, i64)> {
-        let query_lower = query.trim().to_lowercase();
-
-        // Parse: TRUNCATE [TABLE] table_name
-        let after_truncate = query_lower
-            .strip_prefix("truncate")
-            .ok_or_else(|| SqlError::SyntaxError("invalid TRUNCATE syntax".to_string()))?
-            .trim_start();
-
-        // Skip optional TABLE keyword
-        let table_part = if after_truncate.starts_with("table ") {
-            after_truncate.strip_prefix("table ").unwrap().trim_start()
-        } else {
-            after_truncate
-        };
-
-        let table_name = table_part
-            .split_whitespace()
-            .next()
-            .ok_or_else(|| SqlError::SyntaxError("missing table name".to_string()))?;
-
-        let path = self.parse_table_name(table_name)?;
-
-        // Get current record count before truncation
-        let info = self
-            .store
-            .get(&path)
-            .await
-            .map_err(|_| SqlError::TableNotFound(path.display()))?;
-
-        let record_count = info.total_records as i64;
-
-        // Truncate the table
-        self.store
-            .truncate(&path)
-            .await
-            .map_err(|e| SqlError::Internal(e.to_string()))?;
-
-        info!(
-            path = %path.display(),
-            record_count,
-            "TRUNCATE TABLE executed"
-        );
-
-        Ok((path, record_count))
     }
 
     /// Execute an ALTER TABLE statement.
