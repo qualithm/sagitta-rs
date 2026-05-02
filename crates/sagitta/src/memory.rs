@@ -1146,4 +1146,165 @@ mod tests {
         let store = MemoryStore::default();
         assert!(std::format!("{:?}", store).contains("MemoryStore"));
     }
+
+    #[tokio::test]
+    async fn test_append_batches_success() {
+        let store = MemoryStore::new();
+        let schema = test_schema();
+        let path = test_path();
+
+        store
+            .put(
+                path.clone(),
+                schema.clone(),
+                vec![create_test_batch(schema.clone(), 5)],
+            )
+            .await
+            .unwrap();
+
+        store
+            .append_batches(&path, vec![create_test_batch(schema, 3)])
+            .await
+            .unwrap();
+
+        let info = store.get(&path).await.unwrap();
+        assert_eq!(info.total_records, 8);
+    }
+
+    #[tokio::test]
+    async fn test_append_batches_not_found() {
+        let store = MemoryStore::new();
+        let path = test_path();
+        let schema = test_schema();
+
+        let result = store
+            .append_batches(&path, vec![create_test_batch(schema, 3)])
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_truncate_success() {
+        let store = MemoryStore::new();
+        let schema = test_schema();
+        let path = test_path();
+
+        store
+            .put(
+                path.clone(),
+                schema.clone(),
+                vec![create_test_batch(schema, 10)],
+            )
+            .await
+            .unwrap();
+
+        store.truncate(&path).await.unwrap();
+
+        let info = store.get(&path).await.unwrap();
+        assert_eq!(info.total_records, 0);
+        // Schema should still be present
+        assert!(store.get_schema(&path).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_truncate_not_found() {
+        let store = MemoryStore::new();
+        let result = store.truncate(&test_path()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_schema_success() {
+        let store = MemoryStore::new();
+        store.create_schema("myschema").await.unwrap();
+        assert!(store.schema_exists("myschema").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_create_schema_duplicate_error() {
+        let store = MemoryStore::new();
+        store.create_schema("duplicate").await.unwrap();
+        let result = store.create_schema("duplicate").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_drop_schema_existing() {
+        let store = MemoryStore::new();
+        store.create_schema("todrop").await.unwrap();
+        let dropped = store.drop_schema("todrop").await.unwrap();
+        assert!(dropped);
+        assert!(!store.schema_exists("todrop").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_drop_schema_non_existing() {
+        let store = MemoryStore::new();
+        let dropped = store.drop_schema("nothere").await.unwrap();
+        assert!(!dropped);
+    }
+
+    #[tokio::test]
+    async fn test_list_schemas() {
+        let store = MemoryStore::new();
+        store.create_schema("alpha").await.unwrap();
+        store.create_schema("beta").await.unwrap();
+
+        let mut schemas = store.list_schemas().await.unwrap();
+        schemas.sort();
+        assert!(schemas.contains(&"alpha".to_string()));
+        assert!(schemas.contains(&"beta".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_schema_exists_false() {
+        let store = MemoryStore::new();
+        assert!(!store.schema_exists("absent").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_begin_transaction() {
+        let store = MemoryStore::new();
+        let id = store.begin_transaction().await.unwrap();
+        assert!(id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_commit_transaction() {
+        let store = MemoryStore::new();
+        let id = store.begin_transaction().await.unwrap();
+        store.commit_transaction(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_rollback_transaction() {
+        let store = MemoryStore::new();
+        let id = store.begin_transaction().await.unwrap();
+        store.rollback_transaction(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_copy_not_found() {
+        let store = MemoryStore::new();
+        let src = DataPath::from(vec!["no", "src"]);
+        let dst = DataPath::from(vec!["no", "dst"]);
+        let result = store.copy(&src, dst).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rename_not_found() {
+        let store = MemoryStore::new();
+        let src = DataPath::from(vec!["no", "src"]);
+        let dst = DataPath::from(vec!["no", "dst"]);
+        let result = store.rename(&src, dst).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_schema_not_found() {
+        let store = MemoryStore::new();
+        let result = store.update_schema(&test_path(), test_schema()).await;
+        assert!(result.is_err());
+    }
 }

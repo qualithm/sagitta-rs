@@ -308,3 +308,76 @@ fn load_tls_config(tls: &crate::config::TlsConfig) -> anyhow::Result<ServerTlsCo
 
     Ok(config)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InMemoryUserStore, MemoryStore};
+
+    #[test]
+    fn test_builder_creates_default_config() {
+        let sagitta = Sagitta::builder();
+        assert!(sagitta.store.is_none());
+        assert!(sagitta.user_store.is_none());
+        assert!(sagitta.custom_actions.is_empty());
+    }
+
+    #[test]
+    fn test_builder_with_config() {
+        let config = Config {
+            listen_addr: "127.0.0.1:12345".to_string(),
+            ..Default::default()
+        };
+        let sagitta = Sagitta::builder().config(config.clone());
+        assert_eq!(sagitta.config.listen_addr, "127.0.0.1:12345");
+    }
+
+    #[test]
+    fn test_builder_with_store() {
+        let store = Arc::new(MemoryStore::new());
+        let sagitta = Sagitta::builder().store(store);
+        assert!(sagitta.store.is_some());
+    }
+
+    #[test]
+    fn test_builder_with_user_store() {
+        let user_store = Arc::new(InMemoryUserStore::new());
+        let sagitta = Sagitta::builder().user_store(user_store);
+        assert!(sagitta.user_store.is_some());
+    }
+
+    #[test]
+    fn test_builder_with_action() {
+        use crate::service::CustomAction;
+        use bytes::Bytes;
+        use tonic::Status;
+
+        struct NoopAction;
+        impl CustomAction for NoopAction {
+            fn action_type(&self) -> &str {
+                "noop"
+            }
+            fn description(&self) -> &str {
+                "does nothing"
+            }
+            fn execute(&self, _body: Bytes) -> Result<Vec<Bytes>, Status> {
+                Ok(vec![])
+            }
+        }
+
+        let sagitta = Sagitta::builder().action(Arc::new(NoopAction));
+        assert_eq!(sagitta.custom_actions.len(), 1);
+    }
+
+    #[test]
+    fn test_load_tls_config_missing_cert_file() {
+        let tls = crate::config::TlsConfig {
+            cert_path: "/nonexistent/cert.pem".to_string(),
+            key_path: "/nonexistent/key.pem".to_string(),
+            ca_path: None,
+            client_auth_optional: false,
+        };
+        let result = load_tls_config(&tls);
+        assert!(result.is_err());
+    }
+}
