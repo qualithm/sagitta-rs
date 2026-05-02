@@ -295,3 +295,113 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MemoryStore;
+    use arrow_array::Int64Array;
+    use arrow_schema::{DataType, Field, Schema};
+
+    fn test_path() -> DataPath {
+        DataPath::from(vec!["test", "tbl"])
+    }
+
+    async fn make_store_with_data() -> Arc<MemoryStore> {
+        let store = Arc::new(MemoryStore::new());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("val", DataType::Int64, false),
+        ]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
+                Arc::new(Int64Array::from(vec![10, 20, 30, 40, 50])),
+            ],
+        )
+        .unwrap();
+        store.put(test_path(), schema, vec![batch]).await.unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn test_default_scan_no_projection() {
+        let store = make_store_with_data().await;
+        let batches = store.scan(&test_path(), None).await.unwrap();
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 5);
+    }
+
+    #[tokio::test]
+    async fn test_default_scan_with_projection() {
+        let store = make_store_with_data().await;
+        let batches = store.scan(&test_path(), Some(&[0])).await.unwrap();
+        assert_eq!(batches[0].num_columns(), 1);
+        assert_eq!(batches[0].schema().field(0).name(), "id");
+    }
+
+    #[tokio::test]
+    async fn test_default_scan_with_limit_none() {
+        let store = make_store_with_data().await;
+        let batches = store
+            .scan_with_limit(&test_path(), None, None)
+            .await
+            .unwrap();
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 5);
+    }
+
+    #[tokio::test]
+    async fn test_default_scan_with_limit_zero() {
+        let store = make_store_with_data().await;
+        let batches = store
+            .scan_with_limit(&test_path(), None, Some(0))
+            .await
+            .unwrap();
+        assert!(batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_default_scan_with_limit_partial() {
+        let store = make_store_with_data().await;
+        let batches = store
+            .scan_with_limit(&test_path(), None, Some(3))
+            .await
+            .unwrap();
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 3);
+    }
+
+    #[tokio::test]
+    async fn test_default_scan_with_limit_exceeds_rows() {
+        let store = make_store_with_data().await;
+        let batches = store
+            .scan_with_limit(&test_path(), None, Some(100))
+            .await
+            .unwrap();
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 5);
+    }
+
+    #[tokio::test]
+    async fn test_default_begin_transaction_returns_empty() {
+        let store = MemoryStore::new();
+        let txn_id = store.begin_transaction().await.unwrap();
+        assert!(txn_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_default_commit_transaction_succeeds() {
+        let store = MemoryStore::new();
+        let txn_id = store.begin_transaction().await.unwrap();
+        assert!(store.commit_transaction(&txn_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_default_rollback_transaction_succeeds() {
+        let store = MemoryStore::new();
+        let txn_id = store.begin_transaction().await.unwrap();
+        assert!(store.rollback_transaction(&txn_id).await.is_ok());
+    }
+}

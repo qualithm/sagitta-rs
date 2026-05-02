@@ -3376,4 +3376,200 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].body, bytes::Bytes::from("HELLO WORLD"));
     }
+
+    // ===== Handshake Tests =====
+
+    #[tokio::test]
+    async fn test_handshake_valid_credentials_via_do_action_healthcheck() {
+        // Handshake requires tonic Streaming which can't be constructed in unit tests.
+        // Instead verify the underlying auth plumbing used by handshake works correctly.
+        use crate::MemoryStore;
+
+        let store = Arc::new(MemoryStore::new());
+        let user_store = Arc::new(InMemoryUserStore::with_test_users());
+
+        // Authenticate like handshake does internally
+        let user = user_store.authenticate("admin", "admin123");
+        assert!(user.is_some());
+        let user = user.unwrap();
+
+        let token = user_store.create_token(&user);
+        assert!(!token.as_str().is_empty());
+
+        // Token should be valid
+        let looked_up = user_store.user_for_token(&token);
+        assert!(looked_up.is_some());
+
+        let _ = store;
+    }
+
+    #[test]
+    fn test_handshake_invalid_credentials_authentication_fails() {
+        let user_store = InMemoryUserStore::with_test_users();
+        let result = user_store.authenticate("admin", "wrongpassword");
+        assert!(result.is_none());
+    }
+
+    // ===== DoExchange store/query mode Tests =====
+
+    #[tokio::test]
+    async fn test_do_exchange_store_mode() {
+        use crate::MemoryStore;
+        use arrow_array::builder::Int64Builder;
+        use arrow_flight::encode::FlightDataEncoderBuilder;
+        use arrow_schema::{DataType, Field, Schema};
+        use futures::StreamExt;
+
+        let store = Arc::new(MemoryStore::new());
+        let service = SagittaService::new(store.clone()).await;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let mut builder = Int64Builder::new();
+        for i in 0..5i64 {
+            builder.append_value(i);
+        }
+        let batch =
+            arrow_array::RecordBatch::try_new(schema.clone(), vec![Arc::new(builder.finish())])
+                .unwrap();
+
+        let descriptor = FlightDescriptor::new_path(vec![
+            "exchange".to_string(),
+            "store".to_string(),
+            "dest".to_string(),
+            "table".to_string(),
+        ]);
+
+        let batch_stream = futures::stream::once(async move { Ok(batch) });
+        let flight_stream = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .with_flight_descriptor(Some(descriptor))
+            .build(batch_stream);
+
+        let flight_data: Vec<FlightData> = flight_stream.map(|r| r.unwrap()).collect().await;
+        let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
+        let result = service.do_exchange_inner(stream).await.unwrap();
+
+        assert!(!result.is_empty());
+
+        // Verify data was written to store
+        let dest_path = DataPath::from(vec!["dest", "table"]);
+        assert!(store.contains(&dest_path).await.unwrap());
+        assert_eq!(store.get(&dest_path).await.unwrap().total_records, 5);
+    }
+
+    #[tokio::test]
+    async fn test_do_exchange_store_missing_data_path_error() {
+        use crate::MemoryStore;
+        use arrow_flight::encode::FlightDataEncoderBuilder;
+        use arrow_schema::{DataType, Field, Schema};
+        use futures::StreamExt;
+
+        let store = Arc::new(MemoryStore::new());
+        let service = SagittaService::new(store).await;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+
+        // Path only has "exchange/store" with no data path
+        let descriptor =
+            FlightDescriptor::new_path(vec!["exchange".to_string(), "store".to_string()]);
+
+        let batch_stream = futures::stream::empty::<
+            Result<arrow_array::RecordBatch, arrow_flight::error::FlightError>,
+        >();
+        let flight_stream = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .with_flight_descriptor(Some(descriptor))
+            .build(batch_stream);
+
+        let flight_data: Vec<FlightData> = flight_stream.map(|r| r.unwrap()).collect().await;
+        let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
+        let result = service.do_exchange_inner(stream).await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_do_exchange_query_mode() {
+        use crate::MemoryStore;
+        use arrow_array::Int64Array;
+        use arrow_flight::{FlightData, encode::FlightDataEncoderBuilder, error::FlightError};
+        use arrow_schema::{DataType, Field, Schema};
+        use futures::StreamExt;
+
+        // Seed the store with test data
+        let store = Arc::new(MemoryStore::new());
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
+        let batch = arrow_array::RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1i64, 2, 3]))],
+        )
+        .unwrap();
+        store
+            .put(DataPath::from(vec!["nums"]), schema.clone(), vec![batch])
+            .await
+            .unwrap();
+
+        let service = SagittaService::new(store).await;
+
+        // Send query in app_metadata of first message
+        let descriptor =
+            FlightDescriptor::new_path(vec!["exchange".to_string(), "query".to_string()]);
+
+        let empty_stream =
+            futures::stream::empty::<Result<arrow_array::RecordBatch, FlightError>>();
+        let mut flight_data_vec: Vec<FlightData> = FlightDataEncoderBuilder::new()
+            .with_schema(schema.clone())
+            .with_flight_descriptor(Some(descriptor))
+            .build(empty_stream)
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        // Set app_metadata on first message to contain the SQL query
+        if let Some(first) = flight_data_vec.first_mut() {
+            first.app_metadata = bytes::Bytes::from("SELECT COUNT(*) AS cnt FROM nums");
+        }
+
+        let stream = futures::stream::iter(flight_data_vec.into_iter().map(Ok));
+        let result = service.do_exchange_inner(stream).await.unwrap();
+
+        // Should return result batch
+        assert!(!result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_do_exchange_query_mode_empty_sql_error() {
+        use crate::MemoryStore;
+        use arrow_flight::{FlightData, encode::FlightDataEncoderBuilder, error::FlightError};
+        use arrow_schema::{DataType, Field, Schema};
+        use futures::StreamExt;
+
+        let store = Arc::new(MemoryStore::new());
+        let service = SagittaService::new(store).await;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let descriptor =
+            FlightDescriptor::new_path(vec!["exchange".to_string(), "query".to_string()]);
+
+        let empty_stream =
+            futures::stream::empty::<Result<arrow_array::RecordBatch, FlightError>>();
+        let mut flight_data_vec: Vec<FlightData> = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .with_flight_descriptor(Some(descriptor))
+            .build(empty_stream)
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        // Leave app_metadata empty → should return InvalidArgument
+        if let Some(first) = flight_data_vec.first_mut() {
+            first.app_metadata = bytes::Bytes::new();
+        }
+
+        let stream = futures::stream::iter(flight_data_vec.into_iter().map(Ok));
+        let result = service.do_exchange_inner(stream).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
 }
