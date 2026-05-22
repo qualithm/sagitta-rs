@@ -3,7 +3,7 @@
 # Use Dockerfile.release for production with pre-built binaries
 
 # Stage 1: Plan dependencies
-FROM rust:1.95-alpine3.23 AS planner
+FROM rust:1.95-alpine3.23@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2 AS planner
 RUN cargo install cargo-chef --locked
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -11,7 +11,7 @@ COPY crates ./crates
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2: Cache dependencies
-FROM rust:1.95-alpine3.23 AS cacher
+FROM rust:1.95-alpine3.23@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2 AS cacher
 RUN apk add --no-cache musl-dev
 RUN cargo install cargo-chef --locked
 WORKDIR /build
@@ -20,7 +20,7 @@ COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Stage 3: Build application
-FROM rust:1.95-alpine3.23 AS builder
+FROM rust:1.95-alpine3.23@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2 AS builder
 RUN apk add --no-cache musl-dev
 WORKDIR /build
 # Copy cached dependencies
@@ -33,7 +33,7 @@ COPY crates ./crates
 RUN cargo build --release --package sagitta
 
 # Runtime stage
-FROM alpine:3.23
+FROM alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
 
 # Install minimal runtime dependencies
 RUN apk add --no-cache ca-certificates

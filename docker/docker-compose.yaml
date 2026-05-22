@@ -16,7 +16,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: qualithm/sagitta:latest
+    image: qualithm/sagitta:0.1.5
     container_name: sagitta
     ports:
       - "50051:50051"
