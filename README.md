@@ -1,6 +1,6 @@
 # Sagitta
 
-[![CI](https://github.com/qualithm/sagitta-rs/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/qualithm/sagitta-rs/actions/workflows/ci.yaml)
+[![CI](https://github.com/qualithm/sagitta-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/qualithm/sagitta-rs/actions/workflows/ci.yaml)
 [![codecov](https://codecov.io/gh/qualithm/sagitta-rs/graph/badge.svg)](https://codecov.io/gh/qualithm/sagitta-rs)
 [![Crates.io](https://img.shields.io/crates/v/sagitta)](https://crates.io/crates/sagitta)
 [![docs.rs](https://docs.rs/sagitta/badge.svg)](https://docs.rs/sagitta)
