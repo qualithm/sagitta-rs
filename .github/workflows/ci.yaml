@@ -1,6 +1,16 @@
 name: CI
 
 on:
+  push:
+    branches: [main, test]
+    paths-ignore:
+      - ".githooks/**"
+      - ".vscode/**"
+      - "**/*.md"
+      - "docker/**"
+      - "justfile"
+      - "scripts/**"
+      - "LICENSE"
   pull_request:
     branches: [main, test]
     paths-ignore:
@@ -102,7 +112,16 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage report
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Enforce coverage threshold (>=80%)
+        run: |
+          awk '/^LF:/ {lf+=substr($0,4)} /^LH:/ {lh+=substr($0,4)} END {
+            if (lf == 0) { print "No LF records in lcov.info"; exit 1 }
+            pct = (lh / lf) * 100
+            printf "Line coverage: %.2f%% (%d/%d)\n", pct, lh, lf
+            if (pct + 0 < 80) { print "Coverage below 80% threshold"; exit 1 }
+          }' lcov.info
       - name: Upload coverage to Codecov
+        if: ${{ !cancelled() }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
