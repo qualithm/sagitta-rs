@@ -144,7 +144,9 @@ jobs:
   benchmark-regression:
     name: Benchmark Regression Check
     needs: [changes, build]
-    if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' && needs.changes.outputs.is-main == 'true'
+    if:
+      needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' &&
+      needs.changes.outputs.is-main == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Free disk space
@@ -178,7 +180,9 @@ jobs:
   benchmarks:
     name: Benchmark Baseline
     needs: [changes, build]
-    if: needs.changes.outputs.code == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if:
+      needs.changes.outputs.code == 'true' && github.event_name == 'push' && github.ref ==
+      'refs/heads/main'
     runs-on: ubuntu-24.04
     steps:
       - name: Free disk space
@@ -213,8 +217,7 @@ jobs:
   ci-required:
     name: CI Required
     if: always()
-    needs:
-      [changes, build, test, coverage, doc, benchmark-regression, benchmarks]
+    needs: [changes, build, test, coverage, doc, benchmark-regression, benchmarks]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify dependent jobs
