@@ -13,6 +13,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -212,7 +213,8 @@ jobs:
   ci-required:
     name: CI Required
     if: always()
-    needs: [changes, build, test, coverage, doc, benchmark-regression, benchmarks]
+    needs:
+      [changes, build, test, coverage, doc, benchmark-regression, benchmarks]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify dependent jobs
