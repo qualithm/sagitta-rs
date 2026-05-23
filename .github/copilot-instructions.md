@@ -266,8 +266,7 @@ pub async fn get_user(&self, id: u64) -> Result<User, UserError> {
 
 ## CI & Branch Protection
 
-The `.github/workflows/ci.yaml` file is generated centrally and kept consistent
-across all Qualithm repos. Do not edit it directly — propose template changes
-through the standard process. Branch rulesets enforce a single required status
-check named `CI Required`, supplied by the umbrella job at the end of the
-workflow.
+The `.github/workflows/ci.yaml` file is generated centrally and kept consistent across all Qualithm
+repos. Do not edit it directly — propose template changes through the standard process. Branch
+rulesets enforce a single required status check named `CI Required`, supplied by the umbrella job at
+the end of the workflow.
