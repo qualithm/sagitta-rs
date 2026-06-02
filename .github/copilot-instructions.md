@@ -12,7 +12,7 @@
 
 Any code change should include review of:
 
-- **Tests** - update existing tests, add new tests for new behaviour
+- **Tests** - update existing tests, add new tests for new behavior
 - **Benchmarks** - update if performance characteristics change
 - **Documentation** - update doc comments if public API changes
 - **Error messages** - ensure they remain accurate and helpful

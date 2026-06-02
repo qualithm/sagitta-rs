@@ -181,6 +181,6 @@ Update the version in the root `Cargo.toml` before merging to trigger a new rele
 
 Rust 1.95+ (edition 2024).
 
-## Licence
+## License
 
 Apache-2.0
