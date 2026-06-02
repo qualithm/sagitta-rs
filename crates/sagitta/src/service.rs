@@ -1497,7 +1497,7 @@ impl FlightServiceTrait for SagittaService {
         &self,
         request: Request<Streaming<FlightData>>,
     ) -> Result<Response<Self::DoPutStream>, Status> {
-        // Authenticate and authorise write access
+        // Authenticate and authorize write access
         let user = self.authenticate_request(&request)?;
         if !user.can_write() {
             return Err(Status::permission_denied("write access required"));
@@ -1515,7 +1515,7 @@ impl FlightServiceTrait for SagittaService {
         &self,
         request: Request<Streaming<FlightData>>,
     ) -> Result<Response<Self::DoExchangeStream>, Status> {
-        // Authenticate and authorise write access for exchange
+        // Authenticate and authorize write access for exchange
         let user = self.authenticate_request(&request)?;
         if !user.can_write() {
             return Err(Status::permission_denied("write access required"));
