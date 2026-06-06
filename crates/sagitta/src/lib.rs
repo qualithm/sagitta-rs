@@ -30,8 +30,8 @@ pub use types::{DataPath, FlightDescriptorExt};
 /// Types in this module are not part of the stable public API and may
 /// change between minor versions.
 pub mod internals {
-    pub use crate::catalog::{StoreCatalog, StoreSchema};
-    pub use crate::metadata::{DEFAULT_CATALOG, DEFAULT_SCHEMA, MetadataEngine, MetadataQuery};
-    pub use crate::provider::StoreTableProvider;
-    pub use crate::sql::{EndSavepoint, IsolationLevel, QueryDataStream, SqlEngine};
+  pub use crate::catalog::{StoreCatalog, StoreSchema};
+  pub use crate::metadata::{DEFAULT_CATALOG, DEFAULT_SCHEMA, MetadataEngine, MetadataQuery};
+  pub use crate::provider::StoreTableProvider;
+  pub use crate::sql::{EndSavepoint, IsolationLevel, QueryDataStream, SqlEngine};
 }
