@@ -926,15 +926,7 @@ impl SagittaService {
         // Create CMD descriptor for the response
         let response_descriptor = FlightDescriptor::new_cmd(cmd);
 
-    async fn do_put(
-        &self,
-        request: Request<Streaming<FlightData>>,
-    ) -> Result<Response<Self::DoPutStream>, Status> {
-        // Authenticate and authorize write access
-        let user = self.authenticate_request(&request)?;
-        if !user.can_write() {
-            return Err(Status::permission_denied("write access required"));
-        }
+        let endpoint = FlightEndpoint::new().with_ticket(ticket);
 
         let total_records: i64 = batches.iter().map(|b| b.num_rows() as i64).sum();
 
@@ -946,15 +938,7 @@ impl SagittaService {
           .with_total_records(total_records)
           .with_total_bytes(-1);
 
-    async fn do_exchange(
-        &self,
-        request: Request<Streaming<FlightData>>,
-    ) -> Result<Response<Self::DoExchangeStream>, Status> {
-        // Authenticate and authorize write access for exchange
-        let user = self.authenticate_request(&request)?;
-        if !user.can_write() {
-            return Err(Status::permission_denied("write access required"));
-        }
+        info!(total_records, "returning exported keys info");
 
         Ok(Response::new(info))
       }
