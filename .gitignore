@@ -1,3 +1,9 @@
 .DS_Store
 .env*
 /target
+
+# Coverage/profiling artifacts
+lcov.info
+*.profraw
+*.profdata
+llvm-cov-target/
