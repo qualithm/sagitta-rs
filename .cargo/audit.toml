@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+    # paste is unmaintained but arrow-rs deliberately keeps it (PR #8590 was closed)
+    # https://rustsec.org/advisories/RUSTSEC-2024-0436
+    "RUSTSEC-2024-0436",
+]
