@@ -8,6 +8,7 @@ use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use bytes::Bytes;
 use datafusion::execution::SendableRecordBatchStream;
+use datafusion::prelude::Expr;
 use futures::TryStreamExt;
 
 /// Metadata about a stored dataset.
@@ -154,6 +155,34 @@ pub trait Store: Send + Sync {
       }
     }
     Ok(result)
+  }
+
+  /// Scan a dataset with optional projection, pushed-down filter expressions,
+  /// and a row limit.
+  ///
+  /// `filters` are the predicate expressions DataFusion offered for pushdown
+  /// via the table provider; a backend may use them to skip files, row
+  /// groups, or partitions it can prove cannot match. Pushdown is **best
+  /// effort and inexact**: the query engine re-applies every filter above the
+  /// scan, so a backend may honor any subset (including none) and return a
+  /// superset of the matching rows without affecting correctness.
+  ///
+  /// The default implementation ignores `filters` and delegates to
+  /// [`Self::scan_with_limit`]. Backends with statistics (e.g. min/max bounds
+  /// per file) **should override this method** to prune before reading.
+  ///
+  /// # Errors
+  ///
+  /// Returns `Error::NotFound` if the dataset does not exist.
+  async fn scan_with_filters(
+    &self,
+    path: &DataPath,
+    projection: Option<&[usize]>,
+    filters: &[Expr],
+    limit: Option<usize>,
+  ) -> Result<Vec<Arc<RecordBatch>>> {
+    let _ = filters;
+    self.scan_with_limit(path, projection, limit).await
   }
 
   /// Store a dataset with its schema and data.
