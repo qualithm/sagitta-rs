@@ -161,7 +161,7 @@ pub trait Store: Send + Sync {
   /// and a row limit.
   ///
   /// `filters` are the predicate expressions DataFusion offered for pushdown
-  /// (see [`crate::provider`]); a backend may use them to skip files, row
+  /// via the table provider; a backend may use them to skip files, row
   /// groups, or partitions it can prove cannot match. Pushdown is **best
   /// effort and inexact**: the query engine re-applies every filter above the
   /// scan, so a backend may honor any subset (including none) and return a
