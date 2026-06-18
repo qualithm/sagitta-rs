@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::common::Result as DfResult;
 use datafusion::datasource::{MemTable, TableProvider, TableType};
+use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
 
@@ -69,6 +70,17 @@ impl TableProvider for StoreTableProvider {
     TableType::Base
   }
 
+  /// Advertise inexact pushdown for every filter so DataFusion forwards the
+  /// predicates to [`Self::scan`] (and thus to the [`Store`]) while still
+  /// re-applying them above the scan. Inexact keeps correctness independent of
+  /// how much a backend chooses to prune.
+  fn supports_filters_pushdown(
+    &self,
+    filters: &[&Expr],
+  ) -> DfResult<Vec<TableProviderFilterPushDown>> {
+    Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+  }
+
   async fn scan(
     &self,
     state: &dyn Session,
@@ -84,7 +96,7 @@ impl TableProvider for StoreTableProvider {
     let effective_proj = proj_slice.filter(|p| !p.is_empty());
     let batches = self
       .store
-      .scan_with_limit(&self.path, effective_proj, limit)
+      .scan_with_filters(&self.path, effective_proj, filters, limit)
       .await
       .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
@@ -212,6 +224,31 @@ mod tests {
 
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 4); // id 6, 7, 8, 9
+  }
+
+  #[tokio::test]
+  async fn test_provider_advertises_inexact_filter_pushdown() {
+    use datafusion::logical_expr::TableProviderFilterPushDown;
+    use datafusion::prelude::{col, lit};
+
+    let store = create_test_store().await;
+    let provider = StoreTableProvider::new(store, DataPath::from(vec!["test", "data"]))
+      .await
+      .unwrap();
+
+    let a = col("id").gt(lit(5_i64));
+    let b = col("value").lt(lit(900_i64));
+    let support = provider.supports_filters_pushdown(&[&a, &b]).unwrap();
+
+    // Inexact pushdown forwards the predicates to the store while DataFusion
+    // re-applies them, so correctness never depends on backend pruning.
+    assert_eq!(
+      support,
+      vec![
+        TableProviderFilterPushDown::Inexact,
+        TableProviderFilterPushDown::Inexact
+      ]
+    );
   }
 
   #[tokio::test]
