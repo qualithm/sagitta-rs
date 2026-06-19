@@ -22,6 +22,7 @@ use datafusion::logical_expr::{
   CreateCatalogSchema, CreateView, DdlStatement, DmlStatement, DropCatalogSchema, DropTable,
   DropView, LogicalPlan, WriteOp,
 };
+use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::TableReference;
 use futures::Stream;
@@ -29,6 +30,7 @@ use prost::Message;
 use tracing::{debug, info, warn};
 
 use crate::catalog::StoreCatalog;
+use crate::interceptor::{QueryInterception, SharedInterceptor};
 use crate::provider::StoreTableProvider;
 
 /// Result type for SQL operations.
@@ -319,6 +321,7 @@ pub struct SqlEngine {
   prepared_statements: RwLock<HashMap<Bytes, PreparedStatement>>,
   transactions: RwLock<HashMap<Bytes, Transaction>>,
   next_handle_id: RwLock<u64>,
+  interceptor: Option<SharedInterceptor>,
 }
 
 impl SqlEngine {
@@ -333,7 +336,14 @@ impl SqlEngine {
       prepared_statements: RwLock::new(HashMap::new()),
       transactions: RwLock::new(HashMap::new()),
       next_handle_id: RwLock::new(1),
+      interceptor: None,
     }
+  }
+
+  /// Register a [`StatementInterceptor`] consulted before default statement
+  /// handling. Replaces any previously registered interceptor.
+  pub fn set_interceptor(&mut self, interceptor: SharedInterceptor) {
+    self.interceptor = Some(interceptor);
   }
 
   /// Create a new SessionContext with our catalog configured as the default.
@@ -426,6 +436,20 @@ impl SqlEngine {
     let query = &cmd.query;
     debug!(query = %query, "executing statement query");
 
+    // A registered interceptor may claim the query and supply its own result
+    // schema. The data is produced later, when the ticket is fetched.
+    if let Some(interceptor) = &self.interceptor
+      && let Some(interception) = interceptor.intercept_query(query).await?
+    {
+      let handle = self.create_query_handle(query);
+      info!(query = %query, "query schema resolved by interceptor");
+      return Ok(QueryResult {
+        handle,
+        schema: interception.schema,
+        total_records: -1,
+      });
+    }
+
     // Use DataFusion to validate the query and get the logical plan
     let ctx = self.ctx.read().unwrap().clone();
     let df = ctx
@@ -505,6 +529,18 @@ impl SqlEngine {
 
     debug!(query = %query, "executing statement query data stream via DataFusion");
 
+    // If an interceptor claims the query, stream the batches it produced rather
+    // than executing through DataFusion.
+    if let Some(interceptor) = &self.interceptor
+      && let Some(interception) = interceptor.intercept_query(&query).await?
+    {
+      let QueryInterception { schema, batches } = interception;
+      let stream = MemoryStream::try_new(batches, schema.clone(), None)
+        .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
+      info!(query = %query, "query data produced by interceptor");
+      return Ok((schema, QueryDataStream::new(Box::pin(stream))));
+    }
+
     // Execute the query using DataFusion
     let ctx = self.ctx.read().unwrap().clone();
     let df = ctx
@@ -538,6 +574,16 @@ impl SqlEngine {
   ) -> SqlResult<UpdateResult> {
     let query = &cmd.query;
     debug!(query = %query, transaction_id = ?cmd.transaction_id, "executing statement update");
+
+    // Give a registered interceptor first refusal on the statement. A handled
+    // statement reports its own affected-row count and bypasses the default
+    // store-backed execution; transaction buffering does not apply to it.
+    if let Some(interceptor) = &self.interceptor
+      && let Some(record_count) = interceptor.intercept_update(query).await?
+    {
+      info!(query = %query, record_count, "update handled by interceptor");
+      return Ok(UpdateResult { record_count });
+    }
 
     let (path, record_count) = self.parse_and_execute_update_async(query).await?;
 
