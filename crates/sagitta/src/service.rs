@@ -31,6 +31,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, info, warn};
 use x509_parser::prelude::*;
 
+use crate::interceptor::SharedInterceptor;
 use crate::metadata::{DEFAULT_CATALOG, DEFAULT_SCHEMA, MetadataEngine, MetadataQuery};
 use crate::sql::{
   EndSavepoint, SqlEngine, create_metadata_ticket, create_prepared_statement_result,
@@ -151,6 +152,13 @@ impl SagittaService {
   /// `DoAction`. Returns `self` for chaining.
   pub fn register_action(mut self, action: Arc<dyn CustomAction>) -> Self {
     self.custom_actions.push(action);
+    self
+  }
+
+  /// Register a [`StatementInterceptor`] consulted by the SQL engine before its
+  /// default statement handling. Returns `self` for chaining.
+  pub fn with_interceptor(mut self, interceptor: SharedInterceptor) -> Self {
+    self.sql_engine.set_interceptor(interceptor);
     self
   }
 

@@ -20,6 +20,7 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::info;
 
 use crate::config::Config;
+use crate::interceptor::SharedInterceptor;
 use crate::service::{CustomAction, SagittaService};
 
 // ---------------------------------------------------------------------------
@@ -158,6 +159,7 @@ pub struct Sagitta {
   store: Option<Arc<dyn Store>>,
   user_store: Option<Arc<dyn UserStore>>,
   custom_actions: Vec<Arc<dyn CustomAction>>,
+  interceptor: Option<SharedInterceptor>,
 }
 
 impl Sagitta {
@@ -168,6 +170,7 @@ impl Sagitta {
       store: None,
       user_store: None,
       custom_actions: Vec::new(),
+      interceptor: None,
     }
   }
 
@@ -192,6 +195,13 @@ impl Sagitta {
   /// Register a custom action handler.
   pub fn action(mut self, action: Arc<dyn CustomAction>) -> Self {
     self.custom_actions.push(action);
+    self
+  }
+
+  /// Register a [`StatementInterceptor`](crate::StatementInterceptor) consulted
+  /// by the SQL engine before its default statement handling.
+  pub fn interceptor(mut self, interceptor: SharedInterceptor) -> Self {
+    self.interceptor = Some(interceptor);
     self
   }
 
@@ -228,6 +238,10 @@ impl Sagitta {
       &config.default_schema,
     )
     .await;
+
+    if let Some(interceptor) = self.interceptor {
+      service = service.with_interceptor(interceptor);
+    }
 
     for action in self.custom_actions {
       service = service.register_action(action);
