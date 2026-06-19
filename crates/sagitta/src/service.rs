@@ -155,8 +155,9 @@ impl SagittaService {
     self
   }
 
-  /// Register a [`StatementInterceptor`] consulted by the SQL engine before its
-  /// default statement handling. Returns `self` for chaining.
+  /// Register a [`StatementInterceptor`](crate::StatementInterceptor) consulted
+  /// by the SQL engine before its default statement handling. Returns `self`
+  /// for chaining.
   pub fn with_interceptor(mut self, interceptor: SharedInterceptor) -> Self {
     self.sql_engine.set_interceptor(interceptor);
     self

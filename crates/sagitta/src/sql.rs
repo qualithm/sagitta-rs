@@ -340,8 +340,9 @@ impl SqlEngine {
     }
   }
 
-  /// Register a [`StatementInterceptor`] consulted before default statement
-  /// handling. Replaces any previously registered interceptor.
+  /// Register a [`StatementInterceptor`](crate::StatementInterceptor) consulted
+  /// before default statement handling. Replaces any previously registered
+  /// interceptor.
   pub fn set_interceptor(&mut self, interceptor: SharedInterceptor) {
     self.interceptor = Some(interceptor);
   }
