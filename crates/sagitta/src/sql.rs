@@ -3184,6 +3184,158 @@ mod tests {
     SqlEngine::new(store, DEFAULT_CATALOG, DEFAULT_SCHEMA).await
   }
 
+  /// Test interceptor that claims statements containing specific markers.
+  ///
+  /// `DELETE` updates report a fixed affected-row count, `TIMETRAVEL` queries
+  /// return a fixed single-column batch, and `BOOM` statements fail. Everything
+  /// else falls through to the engine.
+  struct MarkerInterceptor;
+
+  impl MarkerInterceptor {
+    fn intercepted_schema() -> SchemaRef {
+      Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]))
+    }
+  }
+
+  #[async_trait::async_trait]
+  impl crate::interceptor::StatementInterceptor for MarkerInterceptor {
+    async fn intercept_update(&self, sql: &str) -> SqlResult<Option<i64>> {
+      if sql.contains("BOOM") {
+        return Err(SqlError::Internal("boom".to_string()));
+      }
+      if sql.contains("DELETE") {
+        return Ok(Some(7));
+      }
+      Ok(None)
+    }
+
+    async fn intercept_query(&self, sql: &str) -> SqlResult<Option<QueryInterception>> {
+      if sql.contains("BOOM") {
+        return Err(SqlError::Internal("boom".to_string()));
+      }
+      if sql.contains("TIMETRAVEL") {
+        let schema = Self::intercepted_schema();
+        let batch = RecordBatch::try_new(
+          schema.clone(),
+          vec![Arc::new(Int64Array::from(vec![42, 43]))],
+        )
+        .unwrap();
+        return Ok(Some(QueryInterception {
+          schema,
+          batches: vec![batch],
+        }));
+      }
+      Ok(None)
+    }
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_claims_update() {
+    use arrow_flight::sql::CommandStatementUpdate;
+
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    let cmd = CommandStatementUpdate {
+      query: "DELETE FROM test.table WHERE id = 1".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_update(&cmd).await.unwrap();
+    assert_eq!(result.record_count, 7);
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_passes_through_update() {
+    use arrow_flight::sql::CommandStatementUpdate;
+
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    // No marker: the interceptor declines and the engine executes the update.
+    let cmd = CommandStatementUpdate {
+      query: "UPDATE test.\"table\" SET value = 99".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_update(&cmd).await.unwrap();
+    assert_eq!(result.record_count, 3);
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_update_error_propagates() {
+    use arrow_flight::sql::CommandStatementUpdate;
+
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    let cmd = CommandStatementUpdate {
+      query: "DELETE FROM test.table WHERE BOOM".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_update(&cmd).await;
+    assert!(matches!(result, Err(SqlError::Internal(_))));
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_resolves_query_schema() {
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    let cmd = CommandStatementQuery {
+      query: "SELECT * FROM test.table FOR SYSTEM_TIME -- TIMETRAVEL".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_query(&cmd).await.unwrap();
+    assert_eq!(result.total_records, -1);
+    assert_eq!(result.schema.fields().len(), 1);
+    assert_eq!(result.schema.field(0).name(), "n");
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_streams_query_data() {
+    use futures::TryStreamExt;
+
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    let cmd = CommandStatementQuery {
+      query: "SELECT * FROM test.table -- TIMETRAVEL".to_string(),
+      transaction_id: None,
+    };
+    let result = engine.execute_statement_query(&cmd).await.unwrap();
+
+    let ticket = TicketStatementQuery {
+      statement_handle: result.handle,
+    };
+    let (schema, stream) = engine
+      .get_statement_query_data_stream(&ticket)
+      .await
+      .unwrap();
+
+    assert_eq!(schema.field(0).name(), "n");
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 2);
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_passes_through_query() {
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    // No marker: the interceptor declines and DataFusion plans the query.
+    let cmd = CommandStatementQuery {
+      query: "SELECT * FROM test.\"table\"".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_query(&cmd).await.unwrap();
+    assert_eq!(result.schema.fields().len(), 2);
+  }
+
   #[tokio::test]
   async fn test_parse_simple_select() {
     let engine = create_test_engine().await;
