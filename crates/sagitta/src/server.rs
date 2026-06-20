@@ -380,6 +380,27 @@ mod tests {
   }
 
   #[test]
+  fn test_builder_with_interceptor() {
+    use crate::interceptor::{QueryInterception, StatementInterceptor};
+    use crate::sql::SqlResult;
+
+    struct NoopInterceptor;
+
+    #[async_trait::async_trait]
+    impl StatementInterceptor for NoopInterceptor {
+      async fn intercept_update(&self, _sql: &str) -> SqlResult<Option<i64>> {
+        Ok(None)
+      }
+      async fn intercept_query(&self, _sql: &str) -> SqlResult<Option<QueryInterception>> {
+        Ok(None)
+      }
+    }
+
+    let sagitta = Sagitta::builder().interceptor(Arc::new(NoopInterceptor));
+    assert!(sagitta.interceptor.is_some());
+  }
+
+  #[test]
   fn test_load_tls_config_missing_cert_file() {
     let tls = crate::config::TlsConfig {
       cert_path: "/nonexistent/cert.pem".to_string(),

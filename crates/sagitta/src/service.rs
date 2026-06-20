@@ -1943,6 +1943,45 @@ mod tests {
     add_token(Request::new(inner), token)
   }
 
+  #[tokio::test]
+  async fn test_with_interceptor_wires_sql_engine() {
+    use crate::interceptor::{QueryInterception, StatementInterceptor};
+    use crate::sql::SqlResult;
+
+    struct ClaimDeletes;
+
+    #[async_trait::async_trait]
+    impl StatementInterceptor for ClaimDeletes {
+      async fn intercept_update(&self, sql: &str) -> SqlResult<Option<i64>> {
+        if sql.contains("DELETE") {
+          Ok(Some(5))
+        } else {
+          Ok(None)
+        }
+      }
+      async fn intercept_query(&self, _sql: &str) -> SqlResult<Option<QueryInterception>> {
+        Ok(None)
+      }
+    }
+
+    let store: Arc<dyn crate::Store> = Arc::new(crate::MemoryStore::new());
+    let service =
+      SagittaService::with_user_store(store, Arc::new(InMemoryUserStore::with_test_users()))
+        .await
+        .with_interceptor(Arc::new(ClaimDeletes));
+
+    let cmd = arrow_flight::sql::CommandStatementUpdate {
+      query: "DELETE FROM whatever".to_string(),
+      transaction_id: None,
+    };
+    let result = service
+      .sql_engine
+      .execute_statement_update(&cmd)
+      .await
+      .unwrap();
+    assert_eq!(result.record_count, 5);
+  }
+
   #[test]
   fn test_basic_auth_encoding() {
     let payload = encode_basic_auth("admin", "admin123");
