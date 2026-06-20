@@ -22,6 +22,7 @@ use datafusion::logical_expr::{
   CreateCatalogSchema, CreateView, DdlStatement, DmlStatement, DropCatalogSchema, DropTable,
   DropView, LogicalPlan, WriteOp,
 };
+use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::TableReference;
 use futures::Stream;
@@ -29,6 +30,7 @@ use prost::Message;
 use tracing::{debug, info, warn};
 
 use crate::catalog::StoreCatalog;
+use crate::interceptor::{QueryInterception, SharedInterceptor};
 use crate::provider::StoreTableProvider;
 
 /// Result type for SQL operations.
@@ -319,6 +321,7 @@ pub struct SqlEngine {
   prepared_statements: RwLock<HashMap<Bytes, PreparedStatement>>,
   transactions: RwLock<HashMap<Bytes, Transaction>>,
   next_handle_id: RwLock<u64>,
+  interceptor: Option<SharedInterceptor>,
 }
 
 impl SqlEngine {
@@ -333,7 +336,15 @@ impl SqlEngine {
       prepared_statements: RwLock::new(HashMap::new()),
       transactions: RwLock::new(HashMap::new()),
       next_handle_id: RwLock::new(1),
+      interceptor: None,
     }
+  }
+
+  /// Register a [`StatementInterceptor`](crate::StatementInterceptor) consulted
+  /// before default statement handling. Replaces any previously registered
+  /// interceptor.
+  pub fn set_interceptor(&mut self, interceptor: SharedInterceptor) {
+    self.interceptor = Some(interceptor);
   }
 
   /// Create a new SessionContext with our catalog configured as the default.
@@ -426,6 +437,20 @@ impl SqlEngine {
     let query = &cmd.query;
     debug!(query = %query, "executing statement query");
 
+    // A registered interceptor may claim the query and supply its own result
+    // schema. The data is produced later, when the ticket is fetched.
+    if let Some(interceptor) = &self.interceptor
+      && let Some(interception) = interceptor.intercept_query(query).await?
+    {
+      let handle = self.create_query_handle(query);
+      info!(query = %query, "query schema resolved by interceptor");
+      return Ok(QueryResult {
+        handle,
+        schema: interception.schema,
+        total_records: -1,
+      });
+    }
+
     // Use DataFusion to validate the query and get the logical plan
     let ctx = self.ctx.read().unwrap().clone();
     let df = ctx
@@ -505,6 +530,18 @@ impl SqlEngine {
 
     debug!(query = %query, "executing statement query data stream via DataFusion");
 
+    // If an interceptor claims the query, stream the batches it produced rather
+    // than executing through DataFusion.
+    if let Some(interceptor) = &self.interceptor
+      && let Some(interception) = interceptor.intercept_query(&query).await?
+    {
+      let QueryInterception { schema, batches } = interception;
+      let stream = MemoryStream::try_new(batches, schema.clone(), None)
+        .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
+      info!(query = %query, "query data produced by interceptor");
+      return Ok((schema, QueryDataStream::new(Box::pin(stream))));
+    }
+
     // Execute the query using DataFusion
     let ctx = self.ctx.read().unwrap().clone();
     let df = ctx
@@ -538,6 +575,16 @@ impl SqlEngine {
   ) -> SqlResult<UpdateResult> {
     let query = &cmd.query;
     debug!(query = %query, transaction_id = ?cmd.transaction_id, "executing statement update");
+
+    // Give a registered interceptor first refusal on the statement. A handled
+    // statement reports its own affected-row count and bypasses the default
+    // store-backed execution; transaction buffering does not apply to it.
+    if let Some(interceptor) = &self.interceptor
+      && let Some(record_count) = interceptor.intercept_update(query).await?
+    {
+      info!(query = %query, record_count, "update handled by interceptor");
+      return Ok(UpdateResult { record_count });
+    }
 
     let (path, record_count) = self.parse_and_execute_update_async(query).await?;
 
@@ -3135,6 +3182,158 @@ mod tests {
   async fn create_fixture_engine() -> SqlEngine {
     let store: Arc<dyn Store> = Arc::new(MemoryStore::with_test_fixtures());
     SqlEngine::new(store, DEFAULT_CATALOG, DEFAULT_SCHEMA).await
+  }
+
+  /// Test interceptor that claims statements containing specific markers.
+  ///
+  /// `DELETE` updates report a fixed affected-row count, `TIMETRAVEL` queries
+  /// return a fixed single-column batch, and `BOOM` statements fail. Everything
+  /// else falls through to the engine.
+  struct MarkerInterceptor;
+
+  impl MarkerInterceptor {
+    fn intercepted_schema() -> SchemaRef {
+      Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]))
+    }
+  }
+
+  #[async_trait::async_trait]
+  impl crate::interceptor::StatementInterceptor for MarkerInterceptor {
+    async fn intercept_update(&self, sql: &str) -> SqlResult<Option<i64>> {
+      if sql.contains("BOOM") {
+        return Err(SqlError::Internal("boom".to_string()));
+      }
+      if sql.contains("DELETE") {
+        return Ok(Some(7));
+      }
+      Ok(None)
+    }
+
+    async fn intercept_query(&self, sql: &str) -> SqlResult<Option<QueryInterception>> {
+      if sql.contains("BOOM") {
+        return Err(SqlError::Internal("boom".to_string()));
+      }
+      if sql.contains("TIMETRAVEL") {
+        let schema = Self::intercepted_schema();
+        let batch = RecordBatch::try_new(
+          schema.clone(),
+          vec![Arc::new(Int64Array::from(vec![42, 43]))],
+        )
+        .unwrap();
+        return Ok(Some(QueryInterception {
+          schema,
+          batches: vec![batch],
+        }));
+      }
+      Ok(None)
+    }
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_claims_update() {
+    use arrow_flight::sql::CommandStatementUpdate;
+
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    let cmd = CommandStatementUpdate {
+      query: "DELETE FROM test.table WHERE id = 1".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_update(&cmd).await.unwrap();
+    assert_eq!(result.record_count, 7);
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_passes_through_update() {
+    use arrow_flight::sql::CommandStatementUpdate;
+
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    // No marker: the interceptor declines and the engine executes the update.
+    let cmd = CommandStatementUpdate {
+      query: "UPDATE test.\"table\" SET value = 99".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_update(&cmd).await.unwrap();
+    assert_eq!(result.record_count, 3);
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_update_error_propagates() {
+    use arrow_flight::sql::CommandStatementUpdate;
+
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    let cmd = CommandStatementUpdate {
+      query: "DELETE FROM test.table WHERE BOOM".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_update(&cmd).await;
+    assert!(matches!(result, Err(SqlError::Internal(_))));
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_resolves_query_schema() {
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    let cmd = CommandStatementQuery {
+      query: "SELECT * FROM test.table FOR SYSTEM_TIME -- TIMETRAVEL".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_query(&cmd).await.unwrap();
+    assert_eq!(result.total_records, -1);
+    assert_eq!(result.schema.fields().len(), 1);
+    assert_eq!(result.schema.field(0).name(), "n");
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_streams_query_data() {
+    use futures::TryStreamExt;
+
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    let cmd = CommandStatementQuery {
+      query: "SELECT * FROM test.table -- TIMETRAVEL".to_string(),
+      transaction_id: None,
+    };
+    let result = engine.execute_statement_query(&cmd).await.unwrap();
+
+    let ticket = TicketStatementQuery {
+      statement_handle: result.handle,
+    };
+    let (schema, stream) = engine
+      .get_statement_query_data_stream(&ticket)
+      .await
+      .unwrap();
+
+    assert_eq!(schema.field(0).name(), "n");
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 2);
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_passes_through_query() {
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(MarkerInterceptor));
+
+    // No marker: the interceptor declines and DataFusion plans the query.
+    let cmd = CommandStatementQuery {
+      query: "SELECT * FROM test.\"table\"".to_string(),
+      transaction_id: None,
+    };
+
+    let result = engine.execute_statement_query(&cmd).await.unwrap();
+    assert_eq!(result.schema.fields().len(), 2);
   }
 
   #[tokio::test]
