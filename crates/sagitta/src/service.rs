@@ -2696,6 +2696,75 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn echo_ingest_store_delegates_to_inner() {
+    use arrow_array::builder::Int64Builder;
+    use arrow_schema::{DataType, Field, Schema};
+    use futures::TryStreamExt;
+
+    use crate::Store;
+
+    let store = EchoIngestStore {
+      inner: crate::MemoryStore::new(),
+    };
+
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+    let make_batch = || {
+      let mut builder = Int64Builder::new();
+      builder.append_value(1);
+      arrow_array::RecordBatch::try_new(schema.clone(), vec![Arc::new(builder.finish())]).unwrap()
+    };
+
+    let path = DataPath::from(vec!["deleg", "table"]);
+
+    store
+      .put(path.clone(), schema.clone(), vec![make_batch()])
+      .await
+      .unwrap();
+    assert!(store.contains(&path).await.unwrap());
+    assert_eq!(store.get(&path).await.unwrap().path, path);
+    assert_eq!(store.get_schema(&path).await.unwrap().fields().len(), 1);
+
+    let batches: Vec<_> = store
+      .get_batches(&path)
+      .await
+      .unwrap()
+      .try_collect()
+      .await
+      .unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(store.list(None).await.unwrap().len(), 1);
+
+    store
+      .append_batches(&path, vec![make_batch()])
+      .await
+      .unwrap();
+
+    let copy_path = DataPath::from(vec!["deleg", "copy"]);
+    store.copy(&path, copy_path.clone()).await.unwrap();
+    assert!(store.contains(&copy_path).await.unwrap());
+
+    let rename_path = DataPath::from(vec!["deleg", "renamed"]);
+    store.rename(&copy_path, rename_path.clone()).await.unwrap();
+    assert!(store.contains(&rename_path).await.unwrap());
+
+    store.update_schema(&path, schema.clone()).await.unwrap();
+    store.truncate(&path).await.unwrap();
+    store.remove(&path).await.unwrap();
+    assert!(!store.contains(&path).await.unwrap());
+
+    store.create_schema("deleg_schema").await.unwrap();
+    assert!(store.schema_exists("deleg_schema").await.unwrap());
+    assert!(
+      store
+        .list_schemas()
+        .await
+        .unwrap()
+        .contains(&"deleg_schema".to_string())
+    );
+    assert!(store.drop_schema("deleg_schema").await.unwrap());
+  }
+
+  #[tokio::test]
   async fn do_put_forwards_and_returns_ingest_metadata() {
     use arrow_array::builder::Int64Builder;
     use arrow_flight::encode::FlightDataEncoderBuilder;
