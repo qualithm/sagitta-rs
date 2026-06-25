@@ -542,6 +542,10 @@ impl SagittaService {
 
     debug!(path = %path.display(), "do_put");
 
+    // Capture the first message's app_metadata to forward to the store as
+    // opaque request metadata before the message is consumed by the decoder.
+    let request_metadata = first.app_metadata.clone();
+
     // Reconstruct stream with first message prepended
     let first_stream = futures::stream::once(async { Ok(first) });
     let rest_stream = stream.map(|r| r.map_err(|e| FlightError::Tonic(Box::new(e))));
@@ -571,10 +575,11 @@ impl SagittaService {
     let batch_count = batches.len();
     let total_records: usize = batches.iter().map(|b| b.num_rows()).sum();
 
-    // Store the dataset
-    self
+    // Ingest the batches, forwarding opaque request metadata and returning the
+    // store's opaque response metadata to the client.
+    let response_metadata = self
       .store
-      .put(path.clone(), schema.clone(), batches)
+      .ingest(&path, schema.clone(), batches, request_metadata)
       .await
       .map_err(Status::from)?;
 
@@ -582,11 +587,11 @@ impl SagittaService {
         path = %path.display(),
         batch_count,
         total_records,
-        "stored dataset"
+        "ingested dataset"
     );
 
     Ok(PutResult {
-      app_metadata: bytes::Bytes::new(),
+      app_metadata: response_metadata,
     })
   }
 
@@ -2605,6 +2610,199 @@ mod tests {
       Ok(_) => panic!("expected NotFound error"),
       Err(status) => assert_eq!(status.code(), tonic::Code::NotFound),
     }
+  }
+
+  struct EchoIngestStore {
+    inner: crate::MemoryStore,
+  }
+
+  #[async_trait::async_trait]
+  impl crate::Store for EchoIngestStore {
+    async fn list(&self, schema_filter: Option<&str>) -> crate::Result<Vec<crate::Dataset>> {
+      self.inner.list(schema_filter).await
+    }
+    async fn get(&self, path: &DataPath) -> crate::Result<crate::Dataset> {
+      self.inner.get(path).await
+    }
+    async fn get_schema(&self, path: &DataPath) -> crate::Result<arrow_schema::SchemaRef> {
+      self.inner.get_schema(path).await
+    }
+    async fn get_batches(
+      &self,
+      path: &DataPath,
+    ) -> crate::Result<datafusion::execution::SendableRecordBatchStream> {
+      self.inner.get_batches(path).await
+    }
+    async fn put(
+      &self,
+      path: DataPath,
+      schema: arrow_schema::SchemaRef,
+      batches: Vec<arrow_array::RecordBatch>,
+    ) -> crate::Result<()> {
+      self.inner.put(path, schema, batches).await
+    }
+    async fn append_batches(
+      &self,
+      path: &DataPath,
+      batches: Vec<arrow_array::RecordBatch>,
+    ) -> crate::Result<()> {
+      self.inner.append_batches(path, batches).await
+    }
+    async fn ingest(
+      &self,
+      path: &DataPath,
+      schema: arrow_schema::SchemaRef,
+      batches: Vec<arrow_array::RecordBatch>,
+      request_metadata: bytes::Bytes,
+    ) -> crate::Result<bytes::Bytes> {
+      self.inner.put(path.clone(), schema, batches).await?;
+      // Echo the request metadata back as the response metadata.
+      Ok(request_metadata)
+    }
+    async fn truncate(&self, path: &DataPath) -> crate::Result<()> {
+      self.inner.truncate(path).await
+    }
+    async fn update_schema(
+      &self,
+      path: &DataPath,
+      schema: arrow_schema::SchemaRef,
+    ) -> crate::Result<()> {
+      self.inner.update_schema(path, schema).await
+    }
+    async fn contains(&self, path: &DataPath) -> crate::Result<bool> {
+      self.inner.contains(path).await
+    }
+    async fn remove(&self, path: &DataPath) -> crate::Result<()> {
+      self.inner.remove(path).await
+    }
+    async fn copy(&self, src: &DataPath, dst: DataPath) -> crate::Result<()> {
+      self.inner.copy(src, dst).await
+    }
+    async fn rename(&self, src: &DataPath, dst: DataPath) -> crate::Result<()> {
+      self.inner.rename(src, dst).await
+    }
+    async fn create_schema(&self, name: &str) -> crate::Result<()> {
+      self.inner.create_schema(name).await
+    }
+    async fn schema_exists(&self, name: &str) -> crate::Result<bool> {
+      self.inner.schema_exists(name).await
+    }
+    async fn drop_schema(&self, name: &str) -> crate::Result<bool> {
+      self.inner.drop_schema(name).await
+    }
+    async fn list_schemas(&self) -> crate::Result<Vec<String>> {
+      self.inner.list_schemas().await
+    }
+  }
+
+  #[tokio::test]
+  async fn echo_ingest_store_delegates_to_inner() {
+    use arrow_array::builder::Int64Builder;
+    use arrow_schema::{DataType, Field, Schema};
+    use futures::TryStreamExt;
+
+    use crate::Store;
+
+    let store = EchoIngestStore {
+      inner: crate::MemoryStore::new(),
+    };
+
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+    let make_batch = || {
+      let mut builder = Int64Builder::new();
+      builder.append_value(1);
+      arrow_array::RecordBatch::try_new(schema.clone(), vec![Arc::new(builder.finish())]).unwrap()
+    };
+
+    let path = DataPath::from(vec!["deleg", "table"]);
+
+    store
+      .put(path.clone(), schema.clone(), vec![make_batch()])
+      .await
+      .unwrap();
+    assert!(store.contains(&path).await.unwrap());
+    assert_eq!(store.get(&path).await.unwrap().path, path);
+    assert_eq!(store.get_schema(&path).await.unwrap().fields().len(), 1);
+
+    let batches: Vec<_> = store
+      .get_batches(&path)
+      .await
+      .unwrap()
+      .try_collect()
+      .await
+      .unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(store.list(None).await.unwrap().len(), 1);
+
+    store
+      .append_batches(&path, vec![make_batch()])
+      .await
+      .unwrap();
+
+    let copy_path = DataPath::from(vec!["deleg", "copy"]);
+    store.copy(&path, copy_path.clone()).await.unwrap();
+    assert!(store.contains(&copy_path).await.unwrap());
+
+    let rename_path = DataPath::from(vec!["deleg", "renamed"]);
+    store.rename(&copy_path, rename_path.clone()).await.unwrap();
+    assert!(store.contains(&rename_path).await.unwrap());
+
+    store.update_schema(&path, schema.clone()).await.unwrap();
+    store.truncate(&path).await.unwrap();
+    store.remove(&path).await.unwrap();
+    assert!(!store.contains(&path).await.unwrap());
+
+    store.create_schema("deleg_schema").await.unwrap();
+    assert!(store.schema_exists("deleg_schema").await.unwrap());
+    assert!(
+      store
+        .list_schemas()
+        .await
+        .unwrap()
+        .contains(&"deleg_schema".to_string())
+    );
+    assert!(store.drop_schema("deleg_schema").await.unwrap());
+  }
+
+  #[tokio::test]
+  async fn do_put_forwards_and_returns_ingest_metadata() {
+    use arrow_array::builder::Int64Builder;
+    use arrow_flight::encode::FlightDataEncoderBuilder;
+    use arrow_schema::{DataType, Field, Schema};
+    use bytes::Bytes;
+    use futures::StreamExt;
+
+    use crate::Store;
+
+    let store = Arc::new(EchoIngestStore {
+      inner: crate::MemoryStore::new(),
+    });
+    let service = SagittaService::new(store.clone()).await;
+
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+    let mut builder = Int64Builder::new();
+    builder.append_value(1);
+    let batch =
+      arrow_array::RecordBatch::try_new(schema.clone(), vec![Arc::new(builder.finish())]).unwrap();
+
+    let descriptor = FlightDescriptor::new_path(vec!["ingest".to_string(), "echo".to_string()]);
+    let batch_stream = futures::stream::once(async move { Ok(batch) });
+    let flight_stream = FlightDataEncoderBuilder::new()
+      .with_schema(schema.clone())
+      .with_flight_descriptor(Some(descriptor))
+      .build(batch_stream);
+    let mut flight_data: Vec<FlightData> = flight_stream.map(|r| r.unwrap()).collect().await;
+    // Attach opaque request metadata to the first (descriptor) message.
+    flight_data[0].app_metadata = Bytes::from_static(b"req-meta-123");
+
+    let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
+    let result = service.do_put_inner(stream).await.unwrap();
+
+    // The store's response metadata is returned to the client unchanged.
+    assert_eq!(result.app_metadata, Bytes::from_static(b"req-meta-123"));
+
+    let path = DataPath::from(vec!["ingest", "echo"]);
+    assert!(store.contains(&path).await.unwrap());
   }
 
   #[tokio::test]

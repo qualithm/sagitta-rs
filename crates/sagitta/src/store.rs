@@ -200,6 +200,39 @@ pub trait Store: Send + Sync {
   /// Returns an error if the dataset does not exist.
   async fn append_batches(&self, path: &DataPath, batches: Vec<RecordBatch>) -> Result<()>;
 
+  /// Ingest record batches into a dataset, carrying opaque request metadata and
+  /// returning opaque response metadata.
+  ///
+  /// This is the streaming-append entry point used by Flight `DoPut` with a
+  /// PATH descriptor: the first message's `app_metadata` is passed through as
+  /// `request_metadata`, and the returned bytes are sent back to the client as
+  /// the `PutResult.app_metadata`. Both are opaque to the framework, so an
+  /// application can layer its own protocol on top — for example a
+  /// deduplication key in and a durability watermark out.
+  ///
+  /// The default implementation appends the batches, creating the dataset on
+  /// first write, and returns empty metadata. Backends that need request or
+  /// response metadata override this method.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the write fails.
+  async fn ingest(
+    &self,
+    path: &DataPath,
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+    request_metadata: Bytes,
+  ) -> Result<Bytes> {
+    let _ = request_metadata;
+    if self.contains(path).await? {
+      self.append_batches(path, batches).await?;
+    } else {
+      self.put(path.clone(), schema, batches).await?;
+    }
+    Ok(Bytes::new())
+  }
+
   /// Truncate a dataset, removing all data but keeping the schema.
   ///
   /// Returns an error if the dataset does not exist.
