@@ -19,13 +19,9 @@ Any code change should include review of:
 - **Configuration** - update defaults, env vars, or config files if affected
 - **Dependencies** - check for unused deps after removing code
 
-Run before committing:
-
-```bash
-cargo fmt
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
+Run before committing: see
+[.github/instructions/checks.instructions.md](.github/instructions/checks.instructions.md) (synced
+from dx) for the exact commands this repo's CI enforces.
 
 ## Imports
 
