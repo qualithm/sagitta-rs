@@ -39,5 +39,4 @@ Refs #456
   - Emit as `Closes #N` when the PR's base branch is the repo's default branch (so the issue
     auto-closes on merge); emit as `Refs #N` for every other base branch (so the reference is
     visible without prematurely closing anything).
-- Omit the references block entirely if no issues were referenced in the range.
-</content>
+- Omit the references block entirely if no issues were referenced in the range. </content>
