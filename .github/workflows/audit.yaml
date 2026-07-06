@@ -27,14 +27,14 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Report failure
         if: steps.scan.outcome == 'failure'
-        uses: qualithm/dx/.github/actions/report-scan-failure@main
+        uses: ./.github/actions/report-scan-failure
         with:
           mode: report
           title: "${{ github.event.repository.name }}: RustSec found an advisory"
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Resolve stale failure issue
         if: steps.scan.outcome == 'success'
-        uses: qualithm/dx/.github/actions/report-scan-failure@main
+        uses: ./.github/actions/report-scan-failure
         with:
           mode: resolve
           title: "${{ github.event.repository.name }}: RustSec found an advisory"
@@ -55,14 +55,14 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
       - name: Report failure
         if: steps.scan.outcome == 'failure'
-        uses: qualithm/dx/.github/actions/report-scan-failure@main
+        uses: ./.github/actions/report-scan-failure
         with:
           mode: report
           title: "${{ github.event.repository.name }}: cargo-deny flagged a policy violation"
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Resolve stale failure issue
         if: steps.scan.outcome == 'success'
-        uses: qualithm/dx/.github/actions/report-scan-failure@main
+        uses: ./.github/actions/report-scan-failure
         with:
           mode: resolve
           title: "${{ github.event.repository.name }}: cargo-deny flagged a policy violation"
@@ -95,14 +95,14 @@ jobs:
         run: cargo +nightly udeps --workspace
       - name: Report failure
         if: steps.scan.outcome == 'failure'
-        uses: qualithm/dx/.github/actions/report-scan-failure@main
+        uses: ./.github/actions/report-scan-failure
         with:
           mode: report
           title: "${{ github.event.repository.name }}: cargo-udeps found unused dependencies"
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Resolve stale failure issue
         if: steps.scan.outcome == 'success'
-        uses: qualithm/dx/.github/actions/report-scan-failure@main
+        uses: ./.github/actions/report-scan-failure
         with:
           mode: resolve
           title: "${{ github.event.repository.name }}: cargo-udeps found unused dependencies"
