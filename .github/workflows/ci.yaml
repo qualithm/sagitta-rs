@@ -55,7 +55,7 @@ jobs:
   build:
     name: Build
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - name: Free disk space
@@ -76,7 +76,7 @@ jobs:
   test:
     name: Test
     needs: [changes, build]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - name: Free disk space
@@ -93,7 +93,9 @@ jobs:
   coverage:
     name: Coverage
     needs: [changes, build]
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.is-main == 'true'
+    if:
+      needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' &&
+      needs.changes.outputs.is-main == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Free disk space
@@ -132,7 +134,9 @@ jobs:
   doc:
     name: Documentation
     needs: [changes, build]
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.is-main == 'true'
+    if:
+      needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' &&
+      needs.changes.outputs.is-main == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
