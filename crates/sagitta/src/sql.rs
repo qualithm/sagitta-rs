@@ -30,7 +30,7 @@ use prost::Message;
 use tracing::{debug, info, warn};
 
 use crate::catalog::StoreCatalog;
-use crate::interceptor::{QueryInterception, SharedInterceptor};
+use crate::interceptor::{InterceptContext, QueryInterception, SharedInterceptor};
 use crate::provider::StoreTableProvider;
 
 /// Result type for SQL operations.
@@ -434,13 +434,27 @@ impl SqlEngine {
     &self,
     cmd: &CommandStatementQuery,
   ) -> SqlResult<QueryResult> {
+    self
+      .execute_statement_query_with_context(cmd, &InterceptContext::default())
+      .await
+  }
+
+  /// Execute a statement query command with request context.
+  ///
+  /// Identical to [`execute_statement_query`](Self::execute_statement_query),
+  /// but forwards `ctx` (the authenticated caller) to a registered interceptor.
+  pub async fn execute_statement_query_with_context(
+    &self,
+    cmd: &CommandStatementQuery,
+    ctx: &InterceptContext,
+  ) -> SqlResult<QueryResult> {
     let query = &cmd.query;
     debug!(query = %query, "executing statement query");
 
     // A registered interceptor may claim the query and supply its own result
     // schema. The data is produced later, when the ticket is fetched.
     if let Some(interceptor) = &self.interceptor
-      && let Some(interception) = interceptor.intercept_query(query).await?
+      && let Some(interception) = interceptor.intercept_query_with_context(ctx, query).await?
     {
       let handle = self.create_query_handle(query);
       info!(query = %query, "query schema resolved by interceptor");
@@ -524,6 +538,21 @@ impl SqlEngine {
     &self,
     ticket: &TicketStatementQuery,
   ) -> SqlResult<(SchemaRef, QueryDataStream)> {
+    self
+      .get_statement_query_data_stream_with_context(ticket, &InterceptContext::default())
+      .await
+  }
+
+  /// Get a streaming data source for a statement query ticket with request context.
+  ///
+  /// Identical to
+  /// [`get_statement_query_data_stream`](Self::get_statement_query_data_stream),
+  /// but forwards `ctx` (the authenticated caller) to a registered interceptor.
+  pub async fn get_statement_query_data_stream_with_context(
+    &self,
+    ticket: &TicketStatementQuery,
+    ctx: &InterceptContext,
+  ) -> SqlResult<(SchemaRef, QueryDataStream)> {
     let handle = &ticket.statement_handle;
     let query = String::from_utf8(handle.to_vec())
       .map_err(|_| SqlError::InvalidCommand("invalid query handle".to_string()))?;
@@ -533,7 +562,9 @@ impl SqlEngine {
     // If an interceptor claims the query, stream the batches it produced rather
     // than executing through DataFusion.
     if let Some(interceptor) = &self.interceptor
-      && let Some(interception) = interceptor.intercept_query(&query).await?
+      && let Some(interception) = interceptor
+        .intercept_query_with_context(ctx, &query)
+        .await?
     {
       let QueryInterception { schema, batches } = interception;
       let stream = MemoryStream::try_new(batches, schema.clone(), None)
@@ -573,6 +604,20 @@ impl SqlEngine {
     &self,
     cmd: &CommandStatementUpdate,
   ) -> SqlResult<UpdateResult> {
+    self
+      .execute_statement_update_with_context(cmd, &InterceptContext::default())
+      .await
+  }
+
+  /// Execute a statement update command with request context.
+  ///
+  /// Identical to [`execute_statement_update`](Self::execute_statement_update),
+  /// but forwards `ctx` (the authenticated caller) to a registered interceptor.
+  pub async fn execute_statement_update_with_context(
+    &self,
+    cmd: &CommandStatementUpdate,
+    ctx: &InterceptContext,
+  ) -> SqlResult<UpdateResult> {
     let query = &cmd.query;
     debug!(query = %query, transaction_id = ?cmd.transaction_id, "executing statement update");
 
@@ -580,7 +625,9 @@ impl SqlEngine {
     // statement reports its own affected-row count and bypasses the default
     // store-backed execution; transaction buffering does not apply to it.
     if let Some(interceptor) = &self.interceptor
-      && let Some(record_count) = interceptor.intercept_update(query).await?
+      && let Some(record_count) = interceptor
+        .intercept_update_with_context(ctx, query)
+        .await?
     {
       info!(query = %query, record_count, "update handled by interceptor");
       return Ok(UpdateResult { record_count });
@@ -3276,6 +3323,70 @@ mod tests {
 
     let result = engine.execute_statement_update(&cmd).await;
     assert!(matches!(result, Err(SqlError::Internal(_))));
+  }
+
+  /// Interceptor that records the principal it observed for each `DELETE`.
+  #[derive(Default)]
+  struct RecordingInterceptor {
+    seen: std::sync::Mutex<Vec<Option<String>>>,
+  }
+
+  #[async_trait::async_trait]
+  impl crate::interceptor::StatementInterceptor for RecordingInterceptor {
+    async fn intercept_update(&self, _sql: &str) -> SqlResult<Option<i64>> {
+      Ok(None)
+    }
+
+    async fn intercept_query(&self, _sql: &str) -> SqlResult<Option<QueryInterception>> {
+      Ok(None)
+    }
+
+    async fn intercept_update_with_context(
+      &self,
+      ctx: &InterceptContext,
+      sql: &str,
+    ) -> SqlResult<Option<i64>> {
+      if sql.contains("DELETE") {
+        self.seen.lock().unwrap().push(ctx.principal.clone());
+        return Ok(Some(1));
+      }
+      Ok(None)
+    }
+  }
+
+  #[tokio::test]
+  async fn test_interceptor_receives_request_principal() {
+    use arrow_flight::sql::CommandStatementUpdate;
+
+    let interceptor = Arc::new(RecordingInterceptor::default());
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(interceptor.clone());
+
+    let cmd = CommandStatementUpdate {
+      query: "DELETE FROM test.table WHERE id = 1".to_string(),
+      transaction_id: None,
+    };
+
+    // A populated context reaches the interceptor.
+    let ctx = InterceptContext {
+      principal: Some("alice".to_string()),
+      read_only: false,
+    };
+    let result = engine
+      .execute_statement_update_with_context(&cmd, &ctx)
+      .await
+      .unwrap();
+    assert_eq!(result.record_count, 1);
+
+    // The legacy method still routes through the context path with a default
+    // (empty) context, so existing callers keep working.
+    let result = engine.execute_statement_update(&cmd).await.unwrap();
+    assert_eq!(result.record_count, 1);
+
+    assert_eq!(
+      interceptor.seen.lock().unwrap().as_slice(),
+      &[Some("alice".to_string()), None]
+    );
   }
 
   #[tokio::test]
