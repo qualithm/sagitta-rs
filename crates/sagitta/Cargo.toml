@@ -42,6 +42,9 @@ clap = { version = "4", features = ["derive"] }
 thiserror.workspace = true
 anyhow.workspace = true
 
+# Metrics (facade only; an embedder installs the recorder — see Decision #83)
+metrics = "0.24"
+
 # Query engine
 datafusion.workspace = true
 
@@ -57,6 +60,7 @@ tracing-subscriber.workspace = true
 rcgen = "0.14"
 criterion = { workspace = true }
 rand = "0.8"
+metrics-util = { version = "0.19", features = ["debugging"] }
 
 [[bench]]
 name = "sagitta_bench"
