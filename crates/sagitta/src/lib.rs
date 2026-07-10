@@ -19,7 +19,9 @@ mod types;
 pub use auth::{AccessLevel, AuthToken, InMemoryUserStore, User, UserStore};
 pub use config::{Config, LoggingConfig, ServerConfig, TlsConfig};
 pub use error::{Error, Result};
-pub use interceptor::{QueryInterception, SharedInterceptor, StatementInterceptor};
+pub use interceptor::{
+  InterceptContext, QueryInterception, SharedInterceptor, StatementInterceptor,
+};
 pub use memory::MemoryStore;
 pub use server::Sagitta;
 pub use service::{CustomAction, SagittaService};
