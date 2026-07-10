@@ -31,7 +31,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, info, warn};
 use x509_parser::prelude::*;
 
-use crate::interceptor::SharedInterceptor;
+use crate::interceptor::{InterceptContext, SharedInterceptor};
 use crate::metadata::{DEFAULT_CATALOG, DEFAULT_SCHEMA, MetadataEngine, MetadataQuery};
 use crate::sql::{
   EndSavepoint, SqlEngine, create_metadata_ticket, create_prepared_statement_result,
@@ -263,6 +263,14 @@ impl SagittaService {
     self
       .authenticate_mtls(request)
       .ok_or_else(|| Status::unauthenticated("missing authorization header or client certificate"))
+  }
+
+  /// Convert an authenticated user into an [`InterceptContext`].
+  fn intercept_context(user: &User) -> InterceptContext {
+    InterceptContext {
+      principal: Some(user.username.clone()),
+      read_only: !user.can_write(),
+    }
   }
 
   /// Convert a stored dataset to a FlightInfo.
@@ -512,7 +520,11 @@ impl SagittaService {
   /// Inner implementation of do_put that works with any stream.
   /// This allows testing without tonic's Streaming type.
   #[allow(clippy::result_large_err)]
-  async fn do_put_inner<S>(&self, mut stream: S) -> Result<PutResult, Status>
+  async fn do_put_inner<S>(
+    &self,
+    mut stream: S,
+    ctx: &InterceptContext,
+  ) -> Result<PutResult, Status>
   where
     S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
   {
@@ -532,7 +544,7 @@ impl SagittaService {
     if let Some(cmd) = descriptor.command_bytes() {
       // Check if this command includes parameter data
       return self
-        .do_put_cmd_with_stream(cmd.clone(), first, stream)
+        .do_put_cmd_with_stream(cmd.clone(), first, stream, ctx)
         .await;
     }
 
@@ -604,6 +616,7 @@ impl SagittaService {
     cmd: bytes::Bytes,
     first: FlightData,
     stream: S,
+    ctx: &InterceptContext,
   ) -> Result<PutResult, Status>
   where
     S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
@@ -618,7 +631,7 @@ impl SagittaService {
           .await
       }
       // For other commands, delegate to the simpler handler
-      _ => self.do_put_cmd(cmd).await,
+      _ => self.do_put_cmd(cmd, ctx).await,
     }
   }
 
@@ -684,14 +697,21 @@ impl SagittaService {
 
   /// Handle Flight SQL commands via CMD descriptor.
   #[allow(clippy::result_large_err)]
-  async fn get_flight_info_cmd(&self, cmd: bytes::Bytes) -> Result<Response<FlightInfo>, Status> {
+  async fn get_flight_info_cmd(
+    &self,
+    cmd: bytes::Bytes,
+    ctx: &InterceptContext,
+  ) -> Result<Response<FlightInfo>, Status> {
     let command = SqlEngine::parse_command(&cmd)?;
 
     match command {
       Command::CommandStatementQuery(query_cmd) => {
         debug!(query = %query_cmd.query, "CommandStatementQuery");
 
-        let result = self.sql_engine.execute_statement_query(&query_cmd).await?;
+        let result = self
+          .sql_engine
+          .execute_statement_query_with_context(&query_cmd, ctx)
+          .await?;
 
         // Create ticket with statement handle
         let ticket_bytes = create_statement_ticket(result.handle);
@@ -1114,7 +1134,11 @@ impl SagittaService {
 
   /// Handle Flight SQL commands via CMD descriptor in DoPut.
   #[allow(clippy::result_large_err)]
-  async fn do_put_cmd(&self, cmd: bytes::Bytes) -> Result<PutResult, Status> {
+  async fn do_put_cmd(
+    &self,
+    cmd: bytes::Bytes,
+    ctx: &InterceptContext,
+  ) -> Result<PutResult, Status> {
     let command = SqlEngine::parse_command(&cmd)?;
 
     match command {
@@ -1123,7 +1147,7 @@ impl SagittaService {
 
         let result = self
           .sql_engine
-          .execute_statement_update(&update_cmd)
+          .execute_statement_update_with_context(&update_cmd, ctx)
           .await?;
 
         // Return DoPutUpdateResult in app_metadata
@@ -1184,6 +1208,7 @@ impl SagittaService {
   async fn do_get_statement_query(
     &self,
     ticket: &TicketStatementQuery,
+    ctx: &InterceptContext,
   ) -> Result<BoxedFlightStream<FlightData>, Status> {
     let handle = &ticket.statement_handle;
     let handle_str = String::from_utf8_lossy(handle);
@@ -1223,7 +1248,7 @@ impl SagittaService {
       debug!(handle = %handle_str, "getting statement query data stream");
       self
         .sql_engine
-        .get_statement_query_data_stream(ticket)
+        .get_statement_query_data_stream_with_context(ticket, ctx)
         .await?
     };
 
@@ -1374,12 +1399,13 @@ impl FlightServiceTrait for SagittaService {
     &self,
     request: Request<FlightDescriptor>,
   ) -> Result<Response<FlightInfo>, Status> {
-    self.authenticate_request(&request)?;
+    let user = self.authenticate_request(&request)?;
     let descriptor = request.into_inner();
 
     // Handle CMD descriptors (Flight SQL commands)
     if let Some(cmd_bytes) = descriptor.command_bytes() {
-      return self.get_flight_info_cmd(cmd_bytes.clone()).await;
+      let ctx = Self::intercept_context(&user);
+      return self.get_flight_info_cmd(cmd_bytes.clone(), &ctx).await;
     }
 
     // Handle PATH descriptors (regular datasets)
@@ -1403,13 +1429,14 @@ impl FlightServiceTrait for SagittaService {
     &self,
     request: Request<FlightDescriptor>,
   ) -> Result<Response<PollInfo>, Status> {
-    self.authenticate_request(&request)?;
+    let user = self.authenticate_request(&request)?;
     let descriptor = request.into_inner();
 
     // Handle CMD descriptors (Flight SQL commands)
     let info = if let Some(cmd_bytes) = descriptor.command_bytes() {
+      let ctx = Self::intercept_context(&user);
       self
-        .get_flight_info_cmd(cmd_bytes.clone())
+        .get_flight_info_cmd(cmd_bytes.clone(), &ctx)
         .await?
         .into_inner()
     } else {
@@ -1470,13 +1497,14 @@ impl FlightServiceTrait for SagittaService {
   type DoGetStream = BoxedFlightStream<FlightData>;
 
   async fn do_get(&self, request: Request<Ticket>) -> Result<Response<Self::DoGetStream>, Status> {
-    self.authenticate_request(&request)?;
+    let user = self.authenticate_request(&request)?;
     let ticket = request.into_inner();
 
     // Try to parse as TicketStatementQuery (Flight SQL)
     if let Ok(stmt_ticket) = TicketStatementQuery::decode(ticket.ticket.as_ref()) {
       debug!("do_get: TicketStatementQuery");
-      let stream = self.do_get_statement_query(&stmt_ticket).await?;
+      let ctx = Self::intercept_context(&user);
+      let stream = self.do_get_statement_query(&stmt_ticket, &ctx).await?;
       return Ok(Response::new(stream));
     }
 
@@ -1519,8 +1547,9 @@ impl FlightServiceTrait for SagittaService {
       return Err(Status::permission_denied("write access required"));
     }
 
+    let ctx = Self::intercept_context(&user);
     let stream = request.into_inner();
-    let result = self.do_put_inner(stream).await?;
+    let result = self.do_put_inner(stream, &ctx).await?;
     let stream = futures::stream::once(async { Ok(result) });
     Ok(Response::new(Box::pin(stream)))
   }
@@ -1985,6 +2014,77 @@ mod tests {
       .await
       .unwrap();
     assert_eq!(result.record_count, 5);
+  }
+
+  #[test]
+  fn test_intercept_context_from_user() {
+    let full = User::new("alice", AccessLevel::FullAccess);
+    let ctx = SagittaService::intercept_context(&full);
+    assert_eq!(ctx.principal.as_deref(), Some("alice"));
+    assert!(!ctx.read_only);
+
+    let reader = User::new("bob", AccessLevel::ReadOnly);
+    let ctx = SagittaService::intercept_context(&reader);
+    assert_eq!(ctx.principal.as_deref(), Some("bob"));
+    assert!(ctx.read_only);
+  }
+
+  #[tokio::test]
+  async fn test_do_put_cmd_threads_principal_to_interceptor() {
+    use crate::interceptor::{QueryInterception, StatementInterceptor};
+    use crate::sql::SqlResult;
+    use arrow_flight::sql::{CommandStatementUpdate, ProstMessageExt};
+
+    #[derive(Default)]
+    struct RecordingInterceptor {
+      seen: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StatementInterceptor for RecordingInterceptor {
+      async fn intercept_update(&self, _sql: &str) -> SqlResult<Option<i64>> {
+        Ok(None)
+      }
+      async fn intercept_query(&self, _sql: &str) -> SqlResult<Option<QueryInterception>> {
+        Ok(None)
+      }
+      async fn intercept_update_with_context(
+        &self,
+        ctx: &InterceptContext,
+        sql: &str,
+      ) -> SqlResult<Option<i64>> {
+        if sql.contains("DELETE") {
+          self.seen.lock().unwrap().push(ctx.principal.clone());
+          return Ok(Some(3));
+        }
+        Ok(None)
+      }
+    }
+
+    let interceptor = Arc::new(RecordingInterceptor::default());
+    let store: Arc<dyn crate::Store> = Arc::new(crate::MemoryStore::new());
+    let service =
+      SagittaService::with_user_store(store, Arc::new(InMemoryUserStore::with_test_users()))
+        .await
+        .with_interceptor(interceptor.clone());
+
+    let cmd = CommandStatementUpdate {
+      query: "DELETE FROM whatever".to_string(),
+      transaction_id: None,
+    };
+    let cmd_bytes: bytes::Bytes = cmd.as_any().encode_to_vec().into();
+    let ctx = InterceptContext {
+      principal: Some("carol".to_string()),
+      read_only: false,
+    };
+    let result = service.do_put_cmd(cmd_bytes, &ctx).await.unwrap();
+
+    let update = DoPutUpdateResult::decode(result.app_metadata.as_ref()).unwrap();
+    assert_eq!(update.record_count, 3);
+    assert_eq!(
+      interceptor.seen.lock().unwrap().as_slice(),
+      &[Some("carol".to_string())]
+    );
   }
 
   #[test]
@@ -2796,7 +2896,10 @@ mod tests {
     flight_data[0].app_metadata = Bytes::from_static(b"req-meta-123");
 
     let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
-    let result = service.do_put_inner(stream).await.unwrap();
+    let result = service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await
+      .unwrap();
 
     // The store's response metadata is returned to the client unchanged.
     assert_eq!(result.app_metadata, Bytes::from_static(b"req-meta-123"));
@@ -2840,7 +2943,10 @@ mod tests {
 
     // Create stream and call do_put_inner
     let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
-    let result = service.do_put_inner(stream).await.unwrap();
+    let result = service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await
+      .unwrap();
 
     assert!(result.app_metadata.is_empty());
 
@@ -2896,7 +3002,10 @@ mod tests {
 
     let flight_data: Vec<FlightData> = flight_stream.map(|r| r.unwrap()).collect().await;
     let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
-    service.do_put_inner(stream).await.unwrap();
+    service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await
+      .unwrap();
 
     // Get data back
     let ticket = Ticket::new("roundtrip".as_bytes().to_vec());
@@ -2923,7 +3032,9 @@ mod tests {
     // Empty stream
     let stream = futures::stream::empty();
 
-    let result = service.do_put_inner(stream).await;
+    let result = service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await;
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
   }
@@ -2956,7 +3067,9 @@ mod tests {
     let flight_data: Vec<FlightData> = flight_stream.map(|r| r.unwrap()).collect().await;
     let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
 
-    let result = service.do_put_inner(stream).await;
+    let result = service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await;
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
   }
