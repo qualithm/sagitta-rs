@@ -309,7 +309,15 @@ impl SagittaService {
   /// - `query` — execute a SQL query supplied in `app_metadata` of the first
   ///   message and stream back results.
   #[allow(clippy::result_large_err)]
-  async fn do_exchange_inner<S>(&self, mut stream: S) -> Result<Vec<FlightData>, Status>
+  async fn do_exchange_inner<S>(&self, stream: S) -> Result<Vec<FlightData>, Status>
+  where
+    S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
+  {
+    crate::rpc_metrics::measure("do_exchange", self.do_exchange_impl(stream)).await
+  }
+
+  #[allow(clippy::result_large_err)]
+  async fn do_exchange_impl<S>(&self, mut stream: S) -> Result<Vec<FlightData>, Status>
   where
     S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
   {
@@ -521,11 +529,15 @@ impl SagittaService {
   /// Inner implementation of do_put that works with any stream.
   /// This allows testing without tonic's Streaming type.
   #[allow(clippy::result_large_err)]
-  async fn do_put_inner<S>(
-    &self,
-    mut stream: S,
-    ctx: &InterceptContext,
-  ) -> Result<PutResult, Status>
+  async fn do_put_inner<S>(&self, stream: S, ctx: &InterceptContext) -> Result<PutResult, Status>
+  where
+    S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
+  {
+    crate::rpc_metrics::measure("do_put", self.do_put_impl(stream, ctx)).await
+  }
+
+  #[allow(clippy::result_large_err)]
+  async fn do_put_impl<S>(&self, mut stream: S, ctx: &InterceptContext) -> Result<PutResult, Status>
   where
     S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
   {
@@ -1554,24 +1566,17 @@ impl FlightServiceTrait for SagittaService {
     &self,
     request: Request<Streaming<FlightData>>,
   ) -> Result<Response<Self::DoPutStream>, Status> {
-    let start = Instant::now();
-    let result = async move {
-      // Authenticate and authorize write access
-      let user = self.authenticate_request(&request)?;
-      if !user.can_write() {
-        return Err(Status::permission_denied("write access required"));
-      }
-
-      let ctx = Self::intercept_context(&user);
-      let stream = request.into_inner();
-      let result = self.do_put_inner(stream, &ctx).await?;
-      let stream = futures::stream::once(async { Ok(result) });
-      let stream: Self::DoPutStream = Box::pin(stream);
-      Ok(Response::new(stream))
+    // Authenticate and authorize write access
+    let user = self.authenticate_request(&request)?;
+    if !user.can_write() {
+      return Err(Status::permission_denied("write access required"));
     }
-    .await;
-    crate::rpc_metrics::record_rpc("do_put", start, result.is_ok());
-    result
+
+    let ctx = Self::intercept_context(&user);
+    let stream = request.into_inner();
+    let result = self.do_put_inner(stream, &ctx).await?;
+    let stream = futures::stream::once(async { Ok(result) });
+    Ok(Response::new(Box::pin(stream)))
   }
 
   type DoExchangeStream = BoxedFlightStream<FlightData>;
@@ -1580,23 +1585,16 @@ impl FlightServiceTrait for SagittaService {
     &self,
     request: Request<Streaming<FlightData>>,
   ) -> Result<Response<Self::DoExchangeStream>, Status> {
-    let start = Instant::now();
-    let result = async move {
-      // Authenticate and authorize write access for exchange
-      let user = self.authenticate_request(&request)?;
-      if !user.can_write() {
-        return Err(Status::permission_denied("write access required"));
-      }
-
-      let stream = request.into_inner();
-      let flight_data = self.do_exchange_inner(stream).await?;
-      let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
-      let stream: Self::DoExchangeStream = Box::pin(stream);
-      Ok(Response::new(stream))
+    // Authenticate and authorize write access for exchange
+    let user = self.authenticate_request(&request)?;
+    if !user.can_write() {
+      return Err(Status::permission_denied("write access required"));
     }
-    .await;
-    crate::rpc_metrics::record_rpc("do_exchange", start, result.is_ok());
-    result
+
+    let stream = request.into_inner();
+    let flight_data = self.do_exchange_inner(stream).await?;
+    let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
+    Ok(Response::new(Box::pin(stream)))
   }
 
   type DoActionStream = BoxedFlightStream<arrow_flight::Result>;
