@@ -5,6 +5,7 @@
 //! collects them. See the "sagitta emits per-RPC metrics via the metrics
 //! facade" decision.
 
+use std::future::Future;
 use std::time::Instant;
 
 use metrics::{counter, histogram};
@@ -18,6 +19,20 @@ pub(crate) fn record_rpc(method: &'static str, start: Instant, ok: bool) {
   if !ok {
     counter!("sagitta_flight_rpc_errors_total", "method" => method).increment(1);
   }
+}
+
+/// Time `fut` and record its outcome as a Flight RPC under `method`.
+///
+/// Lets a handler be instrumented where it is testable, rather than at the
+/// stream-typed gRPC trait boundary.
+pub(crate) async fn measure<T, E, F>(method: &'static str, fut: F) -> Result<T, E>
+where
+  F: Future<Output = Result<T, E>>,
+{
+  let start = Instant::now();
+  let result = fut.await;
+  record_rpc(method, start, result.is_ok());
+  result
 }
 
 #[cfg(test)]
