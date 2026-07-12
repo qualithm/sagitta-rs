@@ -20,6 +20,7 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::info;
 
 use crate::config::Config;
+use crate::extension::SharedSessionExtension;
 use crate::interceptor::SharedInterceptor;
 use crate::service::{CustomAction, SagittaService};
 
@@ -160,6 +161,7 @@ pub struct Sagitta {
   user_store: Option<Arc<dyn UserStore>>,
   custom_actions: Vec<Arc<dyn CustomAction>>,
   interceptor: Option<SharedInterceptor>,
+  session_extension: Option<SharedSessionExtension>,
 }
 
 impl Sagitta {
@@ -171,6 +173,7 @@ impl Sagitta {
       user_store: None,
       custom_actions: Vec::new(),
       interceptor: None,
+      session_extension: None,
     }
   }
 
@@ -202,6 +205,15 @@ impl Sagitta {
   /// by the SQL engine before its default statement handling.
   pub fn interceptor(mut self, interceptor: SharedInterceptor) -> Self {
     self.interceptor = Some(interceptor);
+    self
+  }
+
+  /// Register a [`SessionExtension`](crate::SessionExtension) that applies
+  /// embedder DataFusion extensions (`ScalarUDF`s, table functions, optimizer
+  /// rules) to the SQL engine's
+  /// [`SessionContext`](datafusion::prelude::SessionContext).
+  pub fn session_extension(mut self, extension: SharedSessionExtension) -> Self {
+    self.session_extension = Some(extension);
     self
   }
 
@@ -241,6 +253,10 @@ impl Sagitta {
 
     if let Some(interceptor) = self.interceptor {
       service = service.with_interceptor(interceptor);
+    }
+
+    if let Some(extension) = self.session_extension {
+      service = service.with_session_extension(extension);
     }
 
     for action in self.custom_actions {
