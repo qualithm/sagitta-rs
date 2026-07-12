@@ -2,6 +2,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::{
   AccessLevel, AuthToken, DataPath, FlightDescriptorExt, InMemoryUserStore, User, UserStore,
@@ -308,7 +309,15 @@ impl SagittaService {
   /// - `query` — execute a SQL query supplied in `app_metadata` of the first
   ///   message and stream back results.
   #[allow(clippy::result_large_err)]
-  async fn do_exchange_inner<S>(&self, mut stream: S) -> Result<Vec<FlightData>, Status>
+  async fn do_exchange_inner<S>(&self, stream: S) -> Result<Vec<FlightData>, Status>
+  where
+    S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
+  {
+    crate::rpc_metrics::measure("do_exchange", self.do_exchange_impl(stream)).await
+  }
+
+  #[allow(clippy::result_large_err)]
+  async fn do_exchange_impl<S>(&self, mut stream: S) -> Result<Vec<FlightData>, Status>
   where
     S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
   {
@@ -520,11 +529,15 @@ impl SagittaService {
   /// Inner implementation of do_put that works with any stream.
   /// This allows testing without tonic's Streaming type.
   #[allow(clippy::result_large_err)]
-  async fn do_put_inner<S>(
-    &self,
-    mut stream: S,
-    ctx: &InterceptContext,
-  ) -> Result<PutResult, Status>
+  async fn do_put_inner<S>(&self, stream: S, ctx: &InterceptContext) -> Result<PutResult, Status>
+  where
+    S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
+  {
+    crate::rpc_metrics::measure("do_put", self.do_put_impl(stream, ctx)).await
+  }
+
+  #[allow(clippy::result_large_err)]
+  async fn do_put_impl<S>(&self, mut stream: S, ctx: &InterceptContext) -> Result<PutResult, Status>
   where
     S: Stream<Item = Result<FlightData, Status>> + Unpin + Send + 'static,
   {
@@ -1399,30 +1412,36 @@ impl FlightServiceTrait for SagittaService {
     &self,
     request: Request<FlightDescriptor>,
   ) -> Result<Response<FlightInfo>, Status> {
-    let user = self.authenticate_request(&request)?;
-    let descriptor = request.into_inner();
+    let start = Instant::now();
+    let result = async move {
+      let user = self.authenticate_request(&request)?;
+      let descriptor = request.into_inner();
 
-    // Handle CMD descriptors (Flight SQL commands)
-    if let Some(cmd_bytes) = descriptor.command_bytes() {
-      let ctx = Self::intercept_context(&user);
-      return self.get_flight_info_cmd(cmd_bytes.clone(), &ctx).await;
+      // Handle CMD descriptors (Flight SQL commands)
+      if let Some(cmd_bytes) = descriptor.command_bytes() {
+        let ctx = Self::intercept_context(&user);
+        return self.get_flight_info_cmd(cmd_bytes.clone(), &ctx).await;
+      }
+
+      // Handle PATH descriptors (regular datasets)
+      let path = descriptor
+        .to_data_path()
+        .ok_or_else(|| Status::invalid_argument("descriptor must have path or cmd"))?;
+
+      debug!(path = %path.display(), "get_flight_info");
+
+      // Look up dataset in store
+      let stored = self.store.get(&path).await.map_err(Status::from)?;
+
+      let info = self.dataset_to_info(stored)?;
+
+      info!(path = %path.display(), "returning dataset info");
+
+      Ok(Response::new(info))
     }
-
-    // Handle PATH descriptors (regular datasets)
-    let path = descriptor
-      .to_data_path()
-      .ok_or_else(|| Status::invalid_argument("descriptor must have path or cmd"))?;
-
-    debug!(path = %path.display(), "get_flight_info");
-
-    // Look up dataset in store
-    let stored = self.store.get(&path).await.map_err(Status::from)?;
-
-    let info = self.dataset_to_info(stored)?;
-
-    info!(path = %path.display(), "returning dataset info");
-
-    Ok(Response::new(info))
+    .await;
+    crate::rpc_metrics::record_rpc("get_flight_info", start, result.is_ok());
+    result
   }
 
   async fn poll_flight_info(
@@ -1497,42 +1516,48 @@ impl FlightServiceTrait for SagittaService {
   type DoGetStream = BoxedFlightStream<FlightData>;
 
   async fn do_get(&self, request: Request<Ticket>) -> Result<Response<Self::DoGetStream>, Status> {
-    let user = self.authenticate_request(&request)?;
-    let ticket = request.into_inner();
+    let start = Instant::now();
+    let result = async move {
+      let user = self.authenticate_request(&request)?;
+      let ticket = request.into_inner();
 
-    // Try to parse as TicketStatementQuery (Flight SQL)
-    if let Ok(stmt_ticket) = TicketStatementQuery::decode(ticket.ticket.as_ref()) {
-      debug!("do_get: TicketStatementQuery");
-      let ctx = Self::intercept_context(&user);
-      let stream = self.do_get_statement_query(&stmt_ticket, &ctx).await?;
-      return Ok(Response::new(stream));
+      // Try to parse as TicketStatementQuery (Flight SQL)
+      if let Ok(stmt_ticket) = TicketStatementQuery::decode(ticket.ticket.as_ref()) {
+        debug!("do_get: TicketStatementQuery");
+        let ctx = Self::intercept_context(&user);
+        let stream = self.do_get_statement_query(&stmt_ticket, &ctx).await?;
+        return Ok(Response::new(stream));
+      }
+
+      // Fall back to PATH-based ticket (path encoded as "segment1/segment2/...")
+      let path_str = String::from_utf8(ticket.ticket.to_vec())
+        .map_err(|_| Status::invalid_argument("invalid ticket encoding"))?;
+
+      let segments: Vec<String> = path_str.split('/').map(String::from).collect();
+      let path = DataPath::new(segments);
+
+      debug!(path = %path.display(), "do_get");
+
+      // Get schema and batches from store
+      let schema = self.store.get_schema(&path).await.map_err(Status::from)?;
+      let batch_stream = self.store.get_batches(&path).await.map_err(Status::from)?;
+
+      info!(path = %path.display(), "streaming data");
+
+      // Map datafusion errors to flight errors
+      let record_stream = batch_stream.map_err(|e| FlightError::ExternalError(Box::new(e)));
+
+      // Encode as FlightData stream with schema first
+      let flight_stream = FlightDataEncoderBuilder::new()
+        .with_schema(schema)
+        .build(record_stream)
+        .map(|result| result.map_err(|e| Status::internal(format!("encoding error: {e}"))));
+
+      Ok(Response::new(Box::pin(flight_stream)))
     }
-
-    // Fall back to PATH-based ticket (path encoded as "segment1/segment2/...")
-    let path_str = String::from_utf8(ticket.ticket.to_vec())
-      .map_err(|_| Status::invalid_argument("invalid ticket encoding"))?;
-
-    let segments: Vec<String> = path_str.split('/').map(String::from).collect();
-    let path = DataPath::new(segments);
-
-    debug!(path = %path.display(), "do_get");
-
-    // Get schema and batches from store
-    let schema = self.store.get_schema(&path).await.map_err(Status::from)?;
-    let batch_stream = self.store.get_batches(&path).await.map_err(Status::from)?;
-
-    info!(path = %path.display(), "streaming data");
-
-    // Map datafusion errors to flight errors
-    let record_stream = batch_stream.map_err(|e| FlightError::ExternalError(Box::new(e)));
-
-    // Encode as FlightData stream with schema first
-    let flight_stream = FlightDataEncoderBuilder::new()
-      .with_schema(schema)
-      .build(record_stream)
-      .map(|result| result.map_err(|e| Status::internal(format!("encoding error: {e}"))));
-
-    Ok(Response::new(Box::pin(flight_stream)))
+    .await;
+    crate::rpc_metrics::record_rpc("do_get", start, result.is_ok());
+    result
   }
 
   type DoPutStream = BoxedFlightStream<PutResult>;

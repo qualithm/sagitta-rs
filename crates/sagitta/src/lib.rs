@@ -10,6 +10,7 @@ mod interceptor;
 mod memory;
 mod metadata;
 mod provider;
+mod rpc_metrics;
 mod server;
 mod service;
 mod sql;
