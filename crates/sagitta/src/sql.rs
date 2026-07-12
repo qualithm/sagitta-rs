@@ -30,6 +30,7 @@ use prost::Message;
 use tracing::{debug, info, warn};
 
 use crate::catalog::StoreCatalog;
+use crate::extension::SharedSessionExtension;
 use crate::interceptor::{InterceptContext, QueryInterception, SharedInterceptor};
 use crate::provider::StoreTableProvider;
 
@@ -345,6 +346,19 @@ impl SqlEngine {
   /// interceptor.
   pub fn set_interceptor(&mut self, interceptor: SharedInterceptor) {
     self.interceptor = Some(interceptor);
+  }
+
+  /// Register a [`SessionExtension`](crate::SessionExtension) that applies
+  /// embedder DataFusion extensions (`ScalarUDF`s, table functions, optimizer
+  /// rules) to the engine's live [`SessionContext`].
+  ///
+  /// The extension is applied exactly once, to the current context. Registered
+  /// extensions survive catalog refreshes because [`refresh_tables`] re-registers
+  /// the catalog on the existing context rather than recreating it.
+  ///
+  /// [`refresh_tables`]: Self::refresh_tables
+  pub fn set_session_extension(&mut self, extension: SharedSessionExtension) {
+    extension.apply(&self.ctx.read().unwrap());
   }
 
   /// Create a new SessionContext with our catalog configured as the default.
@@ -3229,6 +3243,53 @@ mod tests {
   async fn create_fixture_engine() -> SqlEngine {
     let store: Arc<dyn Store> = Arc::new(MemoryStore::with_test_fixtures());
     SqlEngine::new(store, DEFAULT_CATALOG, DEFAULT_SCHEMA).await
+  }
+
+  #[tokio::test]
+  async fn test_session_extension_udf_usable_and_survives_refresh() {
+    use arrow_array::Array;
+    use datafusion::logical_expr::{ColumnarValue, Volatility, create_udf};
+
+    let mut engine = create_test_engine().await;
+    engine.set_session_extension(Arc::new(|ctx: &SessionContext| {
+      let double_it = create_udf(
+        "double_it",
+        vec![DataType::Int64],
+        DataType::Int64,
+        Volatility::Immutable,
+        Arc::new(|args: &[ColumnarValue]| {
+          let array = args[0].clone().into_array(1)?;
+          let ints = array.as_any().downcast_ref::<Int64Array>().unwrap();
+          let doubled: Int64Array = ints.iter().map(|v| v.map(|x| x * 2)).collect();
+          Ok(ColumnarValue::Array(Arc::new(doubled)))
+        }),
+      );
+      ctx.register_udf(double_it);
+    }));
+
+    async fn eval(engine: &SqlEngine) -> i64 {
+      let batches = engine
+        .session_ctx()
+        .sql("SELECT double_it(21) AS r")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+      batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0)
+    }
+
+    // Usable inside a standard SELECT planned by the engine.
+    assert_eq!(eval(&engine).await, 42);
+
+    // Survives a catalog refresh.
+    engine.refresh_tables().await;
+    assert_eq!(eval(&engine).await, 42);
   }
 
   /// Test interceptor that claims statements containing specific markers.

@@ -6,6 +6,7 @@ mod auth;
 mod catalog;
 mod config;
 mod error;
+mod extension;
 mod interceptor;
 mod memory;
 mod metadata;
@@ -20,6 +21,7 @@ mod types;
 pub use auth::{AccessLevel, AuthToken, InMemoryUserStore, User, UserStore};
 pub use config::{Config, LoggingConfig, ServerConfig, TlsConfig};
 pub use error::{Error, Result};
+pub use extension::{SessionExtension, SharedSessionExtension};
 pub use interceptor::{
   InterceptContext, QueryInterception, SharedInterceptor, StatementInterceptor,
 };
