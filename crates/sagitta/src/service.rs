@@ -32,6 +32,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, info, warn};
 use x509_parser::prelude::*;
 
+use crate::extension::SharedSessionExtension;
 use crate::interceptor::{InterceptContext, SharedInterceptor};
 use crate::metadata::{DEFAULT_CATALOG, DEFAULT_SCHEMA, MetadataEngine, MetadataQuery};
 use crate::sql::{
@@ -161,6 +162,14 @@ impl SagittaService {
   /// for chaining.
   pub fn with_interceptor(mut self, interceptor: SharedInterceptor) -> Self {
     self.sql_engine.set_interceptor(interceptor);
+    self
+  }
+
+  /// Register a [`SessionExtension`](crate::SessionExtension) applied to the
+  /// SQL engine's [`SessionContext`](datafusion::prelude::SessionContext).
+  /// Returns `self` for chaining.
+  pub fn with_session_extension(mut self, extension: SharedSessionExtension) -> Self {
+    self.sql_engine.set_session_extension(extension);
     self
   }
 
