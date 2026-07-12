@@ -417,6 +417,14 @@ mod tests {
   }
 
   #[test]
+  fn test_builder_with_session_extension() {
+    use datafusion::prelude::SessionContext;
+
+    let sagitta = Sagitta::builder().session_extension(Arc::new(|_ctx: &SessionContext| {}));
+    assert!(sagitta.session_extension.is_some());
+  }
+
+  #[test]
   fn test_load_tls_config_missing_cert_file() {
     let tls = crate::config::TlsConfig {
       cert_path: "/nonexistent/cert.pem".to_string(),
