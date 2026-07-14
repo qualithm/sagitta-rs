@@ -2050,6 +2050,42 @@ mod tests {
     assert_eq!(result.record_count, 5);
   }
 
+  #[tokio::test]
+  async fn test_with_session_extension_wires_sql_engine() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use datafusion::prelude::SessionContext;
+
+    let applied = Arc::new(AtomicBool::new(false));
+    let applied_cb = applied.clone();
+
+    let store: Arc<dyn crate::Store> = Arc::new(crate::MemoryStore::new());
+    let service =
+      SagittaService::with_user_store(store, Arc::new(InMemoryUserStore::with_test_users()))
+        .await
+        .with_session_extension(Arc::new(move |_ctx: &SessionContext| {
+          applied_cb.store(true, Ordering::SeqCst);
+        }));
+
+    // The callback runs against the engine's live SessionContext at registration.
+    assert!(
+      applied.load(Ordering::SeqCst),
+      "session extension callback should run when registered"
+    );
+
+    // Engine remains usable afterwards.
+    let batches = service
+      .sql_engine
+      .session_ctx()
+      .sql("SELECT 1 AS n")
+      .await
+      .unwrap()
+      .collect()
+      .await
+      .unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
+  }
+
   #[test]
   fn test_intercept_context_from_user() {
     let full = User::new("alice", AccessLevel::FullAccess);
