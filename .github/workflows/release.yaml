@@ -203,6 +203,7 @@ jobs:
     needs: [docker, publish-crate]
     permissions:
       contents: write
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -258,10 +259,10 @@ jobs:
 
           PROMOTION_TITLE = re.compile(r"^(Promote .* → .* \(\d+ commits?\)|Merge .* into (main|test|development))")
           LEAF_EXCLUDE = [
-              re.compile(r"^docs:"),
-              re.compile(r"^test:"),
-              re.compile(r"^chore:"),
-              re.compile(r"^ci:"),
+              re.compile(r"^docs(\(.+\))?!?:"),
+              re.compile(r"^test(\(.+\))?!?:"),
+              re.compile(r"^chore(\(.+\))?!?:"),
+              re.compile(r"^ci(\(.+\))?!?:"),
               re.compile(r"Merge pull request"),
               re.compile(r"Merge branch"),
           ]
@@ -275,6 +276,10 @@ jobs:
                   cmd += ["-f", f"{k}={v}"]
               out = subprocess.run(cmd, capture_output=True, text=True)
               if out.returncode != 0:
+                  # Surface the failure so a permission/auth/rate-limit error (which would
+                  # otherwise silently degrade every promotion PR to a bare commit entry)
+                  # is visible in the log rather than producing wrong-but-green notes.
+                  print(f"warning: gh api {path} failed: {out.stderr.strip()}", file=sys.stderr)
                   return None, out.stderr
               return json.loads(out.stdout), None
 
