@@ -55,7 +55,10 @@ jobs:
   build:
     name: Build & Test
     needs: changes
-    if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request'
+    # Also runs on push to main. Actions caches are readable only from the branch
+    # that wrote them plus the default branch, so a job that never runs on main
+    # never seeds a cache any other branch can restore.
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Free disk space
@@ -72,17 +75,16 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # Runs here rather than in a separate job: check/clippy have already built every
-      # dependency into this target dir, so the test binaries only need codegen for the
-      # workspace crates. A separate job would repeat the whole dependency build.
+      # Runs here rather than in a separate job. check/clippy emit only .rmeta, so
+      # this still pays for all codegen and linking — but a separate job would pay
+      # that *and* repeat the type-check, disk cleanup, and toolchain setup.
       - run: cargo test --workspace
 
   coverage:
     name: Coverage
     needs: changes
-    if:
-      needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' &&
-      needs.changes.outputs.is-main == 'true'
+    # is-main is also true on push to main, which is what seeds this cache key.
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.is-main == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Free disk space
@@ -123,9 +125,8 @@ jobs:
   doc:
     name: Documentation
     needs: changes
-    if:
-      needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' &&
-      needs.changes.outputs.is-main == 'true'
+    # is-main is also true on push to main, which is what seeds this cache key.
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.is-main == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
