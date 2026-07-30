@@ -25,6 +25,8 @@ use arrow_flight::{
   },
 };
 use arrow_ipc::writer::IpcWriteOptions;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use futures::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use tonic::transport::CertificateDer;
@@ -180,6 +182,20 @@ impl SagittaService {
     let auth_header = request.metadata().get("authorization")?;
     let auth_str = auth_header.to_str().ok()?;
     auth_str.strip_prefix("Bearer ").map(AuthToken::new)
+  }
+
+  /// Extract `username`/`password` from an `authorization: Basic <base64>`
+  /// request header.
+  ///
+  /// This is the form arrow-rs's own `FlightSqlServiceClient::handshake` sends:
+  /// an empty `HandshakeRequest` payload plus the credentials in this header.
+  fn extract_basic_credentials<T>(request: &Request<T>) -> Option<(String, String)> {
+    let auth_header = request.metadata().get("authorization")?;
+    let encoded = auth_header.to_str().ok()?.strip_prefix("Basic ")?;
+    let decoded = BASE64_STANDARD.decode(encoded).ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (username, password) = decoded.split_once(':')?;
+    Some((username.to_string(), password.to_string()))
   }
 
   /// Authenticate a request using Bearer token.
@@ -1296,6 +1312,7 @@ impl FlightServiceTrait for SagittaService {
   ) -> Result<Response<Self::HandshakeStream>, Status> {
     use futures::StreamExt;
 
+    let basic_header = Self::extract_basic_credentials(&request);
     let mut stream = request.into_inner();
 
     // Get the first (and typically only) handshake request
@@ -1311,29 +1328,36 @@ impl FlightServiceTrait for SagittaService {
       "received handshake request"
     );
 
-    // If payload is empty, allow anonymous access (for servers that don't require auth)
-    if handshake_request.payload.is_empty() {
-      debug!("empty payload, allowing anonymous handshake");
+    // Credentials arrive either in the payload as BasicAuth, or — as arrow-rs's
+    // own Flight SQL client sends them — in an `authorization: Basic` header
+    // alongside an empty payload.
+    let credentials = if handshake_request.payload.is_empty() {
+      basic_header
+    } else {
+      let basic_auth = BasicAuth::decode(handshake_request.payload.as_ref())
+        .map_err(|e| Status::invalid_argument(format!("invalid BasicAuth payload: {e}")))?;
+      Some((basic_auth.username, basic_auth.password))
+    };
+
+    // No credentials at all: allow anonymous access (for servers that don't require auth)
+    let Some((username, password)) = credentials else {
+      debug!("no credentials supplied, allowing anonymous handshake");
       let response = HandshakeResponse {
         protocol_version: handshake_request.protocol_version,
         payload: bytes::Bytes::new(),
       };
       let stream = futures::stream::once(async { Ok(response) });
       return Ok(Response::new(Box::pin(stream)));
-    }
+    };
 
-    // Decode BasicAuth from payload
-    let basic_auth = BasicAuth::decode(handshake_request.payload.as_ref())
-      .map_err(|e| Status::invalid_argument(format!("invalid BasicAuth payload: {e}")))?;
-
-    debug!(username = %basic_auth.username, "authenticating user");
+    debug!(username = %username, "authenticating user");
 
     // Authenticate
     let user = self
       .user_store
-      .authenticate(&basic_auth.username, &basic_auth.password)
+      .authenticate(&username, &password)
       .ok_or_else(|| {
-        warn!(username = %basic_auth.username, "authentication failed");
+        warn!(username = %username, "authentication failed");
         Status::unauthenticated("invalid credentials")
       })?;
 
@@ -3802,6 +3826,61 @@ mod tests {
     let user_store = InMemoryUserStore::with_test_users();
     let result = user_store.authenticate("admin", "wrongpassword");
     assert!(result.is_none());
+  }
+
+  fn request_with_auth(value: &str) -> Request<()> {
+    let mut request = Request::new(());
+    request
+      .metadata_mut()
+      .insert("authorization", value.parse().unwrap());
+    request
+  }
+
+  #[test]
+  fn test_extract_basic_credentials_reads_authorization_header() {
+    let encoded = BASE64_STANDARD.encode("admin:admin123");
+    let request = request_with_auth(&format!("Basic {encoded}"));
+
+    let credentials = SagittaService::extract_basic_credentials(&request);
+
+    assert_eq!(
+      credentials,
+      Some(("admin".to_string(), "admin123".to_string()))
+    );
+  }
+
+  #[test]
+  fn test_extract_basic_credentials_keeps_colons_in_password() {
+    let encoded = BASE64_STANDARD.encode("admin:pa:ss");
+    let request = request_with_auth(&format!("Basic {encoded}"));
+
+    let credentials = SagittaService::extract_basic_credentials(&request);
+
+    assert_eq!(
+      credentials,
+      Some(("admin".to_string(), "pa:ss".to_string()))
+    );
+  }
+
+  #[test]
+  fn test_extract_basic_credentials_ignores_other_schemes() {
+    let request = request_with_auth("Bearer sometoken");
+    assert!(SagittaService::extract_basic_credentials(&request).is_none());
+  }
+
+  #[test]
+  fn test_extract_basic_credentials_rejects_malformed_values() {
+    let request = request_with_auth("Basic not-base64!!");
+    assert!(SagittaService::extract_basic_credentials(&request).is_none());
+
+    let encoded = BASE64_STANDARD.encode("no-colon-here");
+    let request = request_with_auth(&format!("Basic {encoded}"));
+    assert!(SagittaService::extract_basic_credentials(&request).is_none());
+  }
+
+  #[test]
+  fn test_extract_basic_credentials_absent_without_header() {
+    assert!(SagittaService::extract_basic_credentials(&Request::new(())).is_none());
   }
 
   // ===== DoExchange store/query mode Tests =====
