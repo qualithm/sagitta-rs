@@ -32,6 +32,7 @@ async-trait = "0.1"
 # Serialisation
 prost = "0.14"
 bytes = "1"
+base64 = "0.22"
 
 # Configuration
 toml = "0.8"
