@@ -1,0 +1,45 @@
+# Vendored by dx/scripts/image-audit-sync from dx's .github/actions/image-audit/action.yaml. Do not edit directly — change the source in dx and re-run image-audit-sync.
+
+name: "Image audit"
+description: >
+  Reports, for every pinned container image, whether a newer version exists and whether the pinned
+  reference carries fixable vulnerabilities. Both are reported because they are independent: a fully
+  current image can still be vulnerable, and upgrading does not always remediate. Nothing is ever
+  rewritten — upgrades are a human decision (Decision
+  https://github.com/orgs/qualithm/discussions/232).
+inputs:
+  mode:
+    description: >
+      helm (image pins in helm/*/values.yaml plus Chart.yaml dependencies) or docker (digest-pinned
+      FROM lines in Dockerfiles).
+    required: true
+  severity:
+    description: "Trivy severities to count, comma-separated."
+    required: false
+    default: "HIGH,CRITICAL"
+outputs:
+  clean:
+    description: "true when nothing is behind and nothing is vulnerable."
+    value: ${{ steps.audit.outputs.clean }}
+  behind:
+    description: "Count of pins with a newer version available."
+    value: ${{ steps.audit.outputs.behind }}
+  vulnerable:
+    description: "Count of pins carrying at least one fixable vulnerability."
+    value: ${{ steps.audit.outputs.vulnerable }}
+  body-file:
+    description: "Path to the rendered markdown report."
+    value: ${{ steps.audit.outputs.body-file }}
+runs:
+  using: "composite"
+  steps:
+    - id: audit
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        SEVERITY: ${{ inputs.severity }}
+        WORKDIR: ${{ github.workspace }}
+        OUT: ${{ runner.temp }}/image-audit-body.md
+      run: |
+        "${{ github.action_path }}/run.sh" >> "$GITHUB_OUTPUT"
+        echo "body-file=${OUT}" >> "$GITHUB_OUTPUT"
