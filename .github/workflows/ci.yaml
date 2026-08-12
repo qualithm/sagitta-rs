@@ -61,10 +61,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
+      # No "Free disk space" step: measured on varv-rs (dx#198), the runner starts
+      # at ~15G free and peak target/ is ~5G, so the ~60-115s cleanup freed ~19G the
+      # job never needs. `doc` (below) has always run without it.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -92,10 +91,8 @@ jobs:
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.is-main == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
+      # No "Free disk space" step: see the build job — measured headroom is
+      # comfortable (dx#198). llvm-cov peaks at ~4G target/ against ~15G free.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -153,10 +150,8 @@ jobs:
       needs.changes.outputs.is-main == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
+      # No "Free disk space" step: see the build job — measured headroom is
+      # comfortable (dx#198); release-profile benches peak well under the ~15G free.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       # Own cache key: benchmarks build the release profile, which shares nothing
@@ -194,10 +189,8 @@ jobs:
       'refs/heads/main'
     runs-on: ubuntu-24.04
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
+      # No "Free disk space" step: see the build job — measured headroom is
+      # comfortable (dx#198); release-profile benches peak well under the ~15G free.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
