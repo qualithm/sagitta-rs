@@ -172,11 +172,6 @@ docker compose -f docker/docker-compose.yaml logs -f
 docker compose -f docker/docker-compose.yaml down
 ```
 
-## Publishing
-
-The crate is automatically published to [crates.io](https://crates.io) when CI passes on main.
-Update the version in the root `Cargo.toml` before merging to trigger a new release.
-
 ## Minimum Supported Rust Version
 
 Rust 1.95+ (edition 2024).
