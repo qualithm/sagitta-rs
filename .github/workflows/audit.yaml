@@ -19,12 +19,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Read advisory ignores from deny.toml
+        id: ignores
+        shell: bash
+        run: |
+          # cargo-deny reads deny.toml; the RustSec action below does not. Bridge the
+          # repo's reviewed/justified ignore list into the audit so the two jobs
+          # agree (dx#380). Comments are stripped and IDs deduped; an absent or
+          # empty list yields an empty ignore input.
+          ids=$(
+            awk '/^\[advisories\]/{a=1;next} /^\[/{a=0} a && $0 ~ /ignore/ && $0 ~ /\[/ {i=1; next} i && /^\]/{i=0} i' deny.toml \
+              | sed 's/#.*//' | grep -oE 'RUSTSEC-[0-9]+-[0-9]+' | sort -u | paste -sd, -
+          )
+          echo "advisories=${ids}" >> "$GITHUB_OUTPUT"
       - name: RustSec audit
         id: scan
         continue-on-error: true
         uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: ${{ steps.ignores.outputs.advisories }}
       - name: Report failure
         if: steps.scan.outcome == 'failure'
         uses: ./.github/actions/report-scan-failure
