@@ -87,8 +87,7 @@ jobs:
   coverage:
     name: Coverage
     needs: changes
-    # is-main is also true on push to main, which is what seeds this cache key.
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.is-main == 'true'
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
