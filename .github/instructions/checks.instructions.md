@@ -15,11 +15,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+CI runs coverage on every PR, whatever the target branch, and on push to `main`:
+
+```bash
+cargo llvm-cov --workspace --lcov --output-path lcov.info   # line coverage must be >=80%
+```
+
 On PRs targeting `main`, CI additionally blocks on:
 
 ```bash
 RUSTDOCFLAGS="-Dwarnings" cargo doc --workspace --no-deps   # doc warnings fail this
-cargo llvm-cov --workspace --lcov --output-path lcov.info   # line coverage must be >=80%
 ```
 
 `cargo doc` warnings (broken intra-doc links, etc.) are easy to miss locally since

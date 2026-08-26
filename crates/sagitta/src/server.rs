@@ -15,8 +15,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::Stream;
+use tonic::transport::Server;
 use tonic::transport::server::{Connected, TcpConnectInfo};
-use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::info;
 
 use crate::config::Config;
@@ -61,12 +61,29 @@ impl LimitedIncoming {
   }
 }
 
-/// A [`TcpStream`] paired with a semaphore permit.
+/// A [`TcpStream`] that may carry a semaphore permit.
 ///
-/// Dropping this value releases the permit, decrementing the active connection count.
+/// When a permit is present, dropping this value releases it, decrementing the
+/// active connection count.
 struct LimitedStream {
   inner: TcpStream,
-  _permit: OwnedSemaphorePermit,
+  _permit: Option<OwnedSemaphorePermit>,
+}
+
+impl LimitedStream {
+  fn from_parts(inner: TcpStream, permit: OwnedSemaphorePermit) -> Self {
+    Self {
+      inner,
+      _permit: Some(permit),
+    }
+  }
+
+  fn unlimited(inner: TcpStream) -> Self {
+    Self {
+      inner,
+      _permit: None,
+    }
+  }
 }
 
 impl AsyncRead for LimitedStream {
@@ -133,10 +150,7 @@ impl Stream for LimitedIncoming {
               // Swap state back to Idle and return the stream.
               let old = std::mem::replace(&mut this.state, LimitedIncomingState::Idle);
               if let LimitedIncomingState::Accepted { stream, .. } = old {
-                return Poll::Ready(Some(Ok(LimitedStream {
-                  inner: stream,
-                  _permit: permit,
-                })));
+                return Poll::Ready(Some(Ok(LimitedStream::from_parts(stream, permit))));
               }
               unreachable!()
             }
@@ -269,21 +283,6 @@ impl Sagitta {
       server = server.tcp_keepalive(Some(Duration::from_secs(config.server.tcp_keepalive_secs)));
     }
 
-    if let Some(tls_config) = &config.tls {
-      let tls = load_tls_config(tls_config)?;
-      server = server.tls_config(tls)?;
-      info!(
-          address = %addr,
-          tls = true,
-          mtls = tls_config.ca_path.is_some(),
-          "sagitta starting"
-      );
-    } else {
-      info!(address = %addr, tls = false, "sagitta starting");
-    }
-
-    let router = server.add_service(FlightServiceServer::new(service));
-
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout_secs);
     let max_connections = config.server.max_connections;
 
@@ -293,6 +292,45 @@ impl Sagitta {
         .expect("failed to install signal handler");
       info!("shutdown signal received, draining connections...");
     };
+
+    if let Some(tls_config) = &config.tls {
+      // The acceptor's certificate resolver re-reads the identity from a
+      // shared holder on every new connection, so a cert-manager renewal
+      // (kubelet refreshes the mounted files) takes effect with no restart.
+      // Established connections keep the identity they negotiated.
+      let resolver = crate::tls_reload::ReloadingCertResolver::from_paths(
+        &tls_config.cert_path,
+        &tls_config.key_path,
+      )?;
+      let rustls_config = crate::tls_reload::reloading_server_config(tls_config, resolver.clone())?;
+      crate::tls_reload::watch_identity(
+        resolver,
+        tls_config.cert_path.clone(),
+        tls_config.key_path.clone(),
+        tls_config.cert_reload_interval_secs,
+      );
+      let acceptor = crate::tls_reload::reloading_acceptor(rustls_config);
+      info!(
+          address = %addr,
+          tls = true,
+          mtls = tls_config.ca_path.is_some(),
+          "sagitta starting"
+      );
+
+      let router = server.add_service(FlightServiceServer::new(service));
+      let listener = TcpListener::bind(addr).await?;
+      let incoming = TlsIncoming::new(listener, acceptor, max_connections);
+      router
+        .serve_with_incoming_shutdown(incoming, shutdown_signal)
+        .await?;
+
+      tokio::time::sleep(shutdown_timeout).await;
+      info!("shutdown complete");
+      return Ok(());
+    }
+
+    info!(address = %addr, tls = false, "sagitta starting");
+    let router = server.add_service(FlightServiceServer::new(service));
 
     if max_connections > 0 {
       info!(max_connections, "connection limit active");
@@ -312,22 +350,90 @@ impl Sagitta {
   }
 }
 
-fn load_tls_config(tls: &crate::config::TlsConfig) -> anyhow::Result<ServerTlsConfig> {
-  let cert = std::fs::read_to_string(&tls.cert_path)?;
-  let key = std::fs::read_to_string(&tls.key_path)?;
-  let identity = Identity::from_pem(cert, key);
+// ---------------------------------------------------------------------------
+// TLS incoming stream with hot-reloaded identity
+// ---------------------------------------------------------------------------
 
-  let mut config = ServerTlsConfig::new().identity(identity);
+/// A [`TcpListener`] incoming stream that completes the TLS handshake per
+/// accepted connection using an acceptor whose certificate identity is
+/// hot-reloaded from disk.
+struct TlsIncoming {
+  listener: TcpListener,
+  acceptor: tokio_rustls::TlsAcceptor,
+  semaphore: Option<Arc<Semaphore>>,
+  state: TlsIncomingState,
+}
 
-  if let Some(ca_path) = &tls.ca_path {
-    let ca_cert = std::fs::read_to_string(ca_path)?;
-    let ca = tonic::transport::Certificate::from_pem(ca_cert);
-    config = config
-      .client_ca_root(ca)
-      .client_auth_optional(tls.client_auth_optional);
+enum TlsIncomingState {
+  Idle,
+  Handshaking {
+    handshake: Pin<
+      Box<dyn Future<Output = io::Result<tokio_rustls::server::TlsStream<LimitedStream>>> + Send>,
+    >,
+  },
+}
+
+impl TlsIncoming {
+  fn new(
+    listener: TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+    max_connections: usize,
+  ) -> Self {
+    Self {
+      listener,
+      acceptor,
+      semaphore: (max_connections > 0).then(|| Arc::new(Semaphore::new(max_connections))),
+      state: TlsIncomingState::Idle,
+    }
   }
+}
 
-  Ok(config)
+impl Stream for TlsIncoming {
+  type Item = io::Result<tokio_rustls::server::TlsStream<LimitedStream>>;
+
+  fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    loop {
+      match &mut self.state {
+        TlsIncomingState::Idle => match self.listener.poll_accept(cx) {
+          Poll::Pending => return Poll::Pending,
+          Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+          Poll::Ready(Ok((stream, _))) => {
+            // Bound concurrent connections the same way [`LimitedIncoming`]
+            // does: without a permit the socket is dropped and the client
+            // retries; with one, the permit rides the TLS stream and is
+            // released when tonic closes the connection.
+            let permit = match &self.semaphore {
+              None => None,
+              Some(semaphore) => match semaphore.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => continue,
+              },
+            };
+            let stream = match permit {
+              Some(permit) => LimitedStream::from_parts(stream, permit),
+              None => LimitedStream::unlimited(stream),
+            };
+            let acceptor = self.acceptor.clone();
+            self.state = TlsIncomingState::Handshaking {
+              handshake: Box::pin(async move { acceptor.accept(stream).await }),
+            };
+          }
+        },
+        TlsIncomingState::Handshaking { handshake } => {
+          let result = std::task::ready!(handshake.as_mut().poll(cx));
+          self.state = TlsIncomingState::Idle;
+          match result {
+            Ok(tls_stream) => return Poll::Ready(Some(Ok(tls_stream))),
+            Err(e) => {
+              // A failed handshake (e.g. a missing/invalid client cert under
+              // mTLS) must not take the listener down: log and keep accepting.
+              tracing::debug!(error = %e, "tls handshake failed");
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 #[cfg(test)]
@@ -425,14 +531,108 @@ mod tests {
   }
 
   #[test]
-  fn test_load_tls_config_missing_cert_file() {
+  fn test_tls_reload_missing_cert_file() {
+    let result = crate::tls_reload::ReloadingCertResolver::from_paths(
+      "/nonexistent/cert.pem",
+      "/nonexistent/key.pem",
+    );
+    assert!(result.is_err());
+  }
+
+  /// Serve with TLS, swap the cert/key files, and assert a new connection
+  /// presents the new leaf — the cert-manager renewal path with no restart.
+  #[tokio::test]
+  async fn test_served_certificate_follows_file_rewrite() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cert_path = dir.path().join("tls.crt");
+    let key_path = dir.path().join("tls.key");
+    write_self_signed(&cert_path, &key_path, "first");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
     let tls = crate::config::TlsConfig {
-      cert_path: "/nonexistent/cert.pem".to_string(),
-      key_path: "/nonexistent/key.pem".to_string(),
+      cert_path: cert_path.to_str().unwrap().to_string(),
+      key_path: key_path.to_str().unwrap().to_string(),
       ca_path: None,
       client_auth_optional: false,
+      cert_reload_interval_secs: 0,
     };
-    let result = load_tls_config(&tls);
-    assert!(result.is_err());
+    let resolver =
+      crate::tls_reload::ReloadingCertResolver::from_paths(&tls.cert_path, &tls.key_path).unwrap();
+    let rustls_config = crate::tls_reload::reloading_server_config(&tls, resolver.clone()).unwrap();
+    let acceptor = crate::tls_reload::reloading_acceptor(rustls_config);
+    let mut incoming = TlsIncoming::new(listener, acceptor, 0);
+
+    // A 1s watcher would keep the test fast enough while still exercising the
+    // file-watch path rather than a manual resolver.replace.
+    crate::tls_reload::watch_identity(resolver, tls.cert_path.clone(), tls.key_path.clone(), 1);
+
+    let server = tokio::spawn(async move {
+      use futures::StreamExt;
+      while let Some(conn) = incoming.next().await {
+        let mut stream = conn.unwrap();
+        // Drain until the client closes; the handshake is what matters.
+        let mut buf = [0u8; 256];
+        let _ = stream.read(&mut buf).await;
+        let _ = stream.shutdown().await;
+      }
+    });
+
+    let before = presented_cert(addr, &cert_path, "first").await;
+
+    // Rotate the files; wait past one watcher tick, then reconnect.
+    write_self_signed(&cert_path, &key_path, "second");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let after = presented_cert(addr, &cert_path, "second").await;
+
+    assert_ne!(before, after);
+
+    server.abort();
+  }
+
+  /// Connect with a client that trusts whatever `ca_cert_path` currently holds
+  /// and return the leaf the server presented.
+  async fn presented_cert(
+    addr: SocketAddr,
+    ca_cert_path: &std::path::Path,
+    server_name: &str,
+  ) -> rustls::pki_types::CertificateDer<'static> {
+    use rustls::pki_types::ServerName;
+
+    let certs = std::fs::read(ca_cert_path).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut certs.as_slice()) {
+      roots.add(cert.unwrap()).unwrap();
+    }
+    let client_config = rustls::ClientConfig::builder()
+      .with_root_certificates(roots)
+      .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let tls_stream = connector
+      .connect(ServerName::try_from(server_name.to_string()).unwrap(), tcp)
+      .await
+      .unwrap();
+    let (_, session) = tls_stream.get_ref();
+    session
+      .peer_certificates()
+      .unwrap()
+      .first()
+      .unwrap()
+      .clone()
+  }
+
+  fn write_self_signed(cert_path: &std::path::Path, key_path: &std::path::Path, cn: &str) {
+    let mut params = rcgen::CertificateParams::new(vec![cn.to_string()]).unwrap();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+      .distinguished_name
+      .push(rcgen::DnType::CommonName, cn);
+    let key_pair = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key_pair).unwrap();
+    std::fs::write(cert_path, cert.pem()).unwrap();
+    std::fs::write(key_path, key_pair.serialize_pem()).unwrap();
   }
 }
