@@ -57,6 +57,16 @@ pub struct TlsConfig {
   /// Defaults to false (client cert required when ca_path is set).
   #[serde(default)]
   pub client_auth_optional: bool,
+
+  /// How often (seconds) the certificate and key files are checked for
+  /// changes and the served identity rebuilt; new connections present the new
+  /// certificate without a restart. 0 disables reloading. Defaults to 300.
+  #[serde(default = "default_cert_reload_interval_secs")]
+  pub cert_reload_interval_secs: u64,
+}
+
+fn default_cert_reload_interval_secs() -> u64 {
+  300
 }
 
 /// Logging configuration.

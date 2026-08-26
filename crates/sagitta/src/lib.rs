@@ -16,6 +16,7 @@ mod server;
 mod service;
 mod sql;
 mod store;
+mod tls_reload;
 mod types;
 
 pub use auth::{AccessLevel, AuthToken, InMemoryUserStore, User, UserStore};

@@ -23,7 +23,11 @@ arrow-ipc = "58"
 arrow-schema = "58"
 
 # gRPC / Async
-tonic = { version = "0.14", features = ["transport", "tls-ring"] }
+tonic = { version = "0.14", features = [
+    "transport",
+    "tls-ring",
+    "tls-connect-info",
+] }
 tokio.workspace = true
 tokio-stream = "0.1"
 futures = "0.3"
@@ -51,6 +55,9 @@ datafusion.workspace = true
 
 # TLS / Certificate parsing
 x509-parser = "0.17"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 
 # Logging
 tracing.workspace = true
@@ -59,6 +66,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 # Certificate generation for tests
 rcgen = "0.14"
+tempfile = "3"
 criterion = { workspace = true }
 rand = "0.8"
 metrics-util = { version = "0.19", features = ["debugging"] }
