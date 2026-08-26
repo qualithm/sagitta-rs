@@ -622,6 +622,16 @@ impl SagittaService {
       .schema()
       .ok_or_else(|| Status::invalid_argument("no schema received in flight data stream"))?;
 
+    // A stream that decodes to a schema but no record batches is a malformed
+    // client (a mis-framed IPC stream), not a legitimate empty write:
+    // accepting it would report success for an ingest that persists nothing.
+    if batches.is_empty() {
+      return Err(Status::invalid_argument(format!(
+        "do_put stream for {} contained a schema but no record batches; refusing a zero-row ingest",
+        path.display()
+      )));
+    }
+
     let batch_count = batches.len();
     let total_records: usize = batches.iter().map(|b| b.num_rows()).sum();
 
@@ -3131,6 +3141,42 @@ mod tests {
       .await;
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+  }
+
+  #[tokio::test]
+  async fn test_do_put_schema_only_stream_error() {
+    use crate::MemoryStore;
+    use arrow_flight::encode::FlightDataEncoderBuilder;
+    use arrow_flight::error::FlightError;
+    use arrow_schema::{DataType, Field, Schema};
+    use futures::StreamExt;
+
+    let store = Arc::new(MemoryStore::new());
+    let service = SagittaService::new(store.clone()).await;
+
+    // Schema but zero record batches: the shape a mis-framed client produces.
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+    let descriptor = FlightDescriptor::new_path(vec!["put".to_string(), "empty".to_string()]);
+    let batch_stream = futures::stream::empty::<Result<arrow_array::RecordBatch, FlightError>>();
+    let flight_stream = FlightDataEncoderBuilder::new()
+      .with_schema(schema)
+      .with_flight_descriptor(Some(descriptor))
+      .build(batch_stream);
+
+    let flight_data: Vec<FlightData> = flight_stream.map(|r| r.unwrap()).collect().await;
+    let stream = futures::stream::iter(flight_data.into_iter().map(Ok));
+
+    let result = service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await;
+
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err.message().contains("no record batches"));
+
+    // Nothing was ingested: the store never saw the path.
+    let path = DataPath::from(vec!["put", "empty"]);
+    assert!(!store.contains(&path).await.unwrap());
   }
 
   #[tokio::test]
