@@ -39,20 +39,27 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           ignore: ${{ steps.ignores.outputs.advisories }}
+      - name: Create app token for pm issue filing
+        id: app-token
+        uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2.0.6
+        with:
+          app-id: ${{ secrets.PROJECTS_GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECTS_GH_APP_PRIVATE_KEY }}
+          owner: qualithm
       - name: Report failure
         if: steps.scan.outcome == 'failure'
         uses: ./.github/actions/report-scan-failure
         with:
           mode: report
           title: "${{ github.event.repository.name }}: RustSec found an advisory"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
       - name: Resolve stale failure issue
         if: steps.scan.outcome == 'success'
         uses: ./.github/actions/report-scan-failure
         with:
           mode: resolve
           title: "${{ github.event.repository.name }}: RustSec found an advisory"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
       - name: Fail job if the scan failed
         if: steps.scan.outcome == 'failure'
         run: exit 1
@@ -61,6 +68,13 @@ jobs:
     name: Dependency Audit (cargo-deny)
     runs-on: ubuntu-24.04
     steps:
+      - name: Create app token for pm issue filing
+        id: app-token
+        uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2.0.6
+        with:
+          app-id: ${{ secrets.PROJECTS_GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECTS_GH_APP_PRIVATE_KEY }}
+          owner: qualithm
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: cargo-deny
@@ -73,14 +87,14 @@ jobs:
         with:
           mode: report
           title: "${{ github.event.repository.name }}: cargo-deny flagged a policy violation"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
       - name: Resolve stale failure issue
         if: steps.scan.outcome == 'success'
         uses: ./.github/actions/report-scan-failure
         with:
           mode: resolve
           title: "${{ github.event.repository.name }}: cargo-deny flagged a policy violation"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
       - name: Fail job if the scan failed
         if: steps.scan.outcome == 'failure'
         run: exit 1
@@ -89,6 +103,13 @@ jobs:
     name: Unused Dependencies
     runs-on: ubuntu-24.04
     steps:
+      - name: Create app token for pm issue filing
+        id: app-token
+        uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2.0.6
+        with:
+          app-id: ${{ secrets.PROJECTS_GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECTS_GH_APP_PRIVATE_KEY }}
+          owner: qualithm
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -113,14 +134,14 @@ jobs:
         with:
           mode: report
           title: "${{ github.event.repository.name }}: cargo-udeps found unused dependencies"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
       - name: Resolve stale failure issue
         if: steps.scan.outcome == 'success'
         uses: ./.github/actions/report-scan-failure
         with:
           mode: resolve
           title: "${{ github.event.repository.name }}: cargo-udeps found unused dependencies"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
       - name: Fail job if the scan failed
         if: steps.scan.outcome == 'failure'
         run: exit 1
