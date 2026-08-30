@@ -600,10 +600,11 @@ mod tests {
     server_name: &str,
   ) -> rustls::pki_types::CertificateDer<'static> {
     use rustls::pki_types::ServerName;
+    use rustls::pki_types::pem::PemObject;
 
     let certs = std::fs::read(ca_cert_path).unwrap();
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut certs.as_slice()) {
+    for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&certs) {
       roots.add(cert.unwrap()).unwrap();
     }
     let client_config = rustls::ClientConfig::builder()
