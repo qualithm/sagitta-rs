@@ -7,11 +7,11 @@
 //! [`watch_identity`] rebuilds that identity whenever the files' mtimes change.
 //! Established connections keep the identity they negotiated.
 
-use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
 use rustls::sign::CertifiedKey;
@@ -83,16 +83,15 @@ fn load_certified_key(cert_path: &str, key_path: &str) -> anyhow::Result<Certifi
   let cert_pem = std::fs::read(cert_path)?;
   let key_pem = std::fs::read(key_path)?;
 
-  let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
-    .collect::<Result<Vec<_>, io::Error>>()
+  let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
+    .collect::<Result<Vec<_>, _>>()
     .map_err(|e| anyhow::anyhow!("parsing certificates from {cert_path}: {e}"))?;
   if certs.is_empty() {
     anyhow::bail!("no PEM certificates found in {cert_path}");
   }
 
-  let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_slice())
-    .map_err(|e| anyhow::anyhow!("parsing private key from {key_path}: {e}"))?
-    .ok_or_else(|| anyhow::anyhow!("no PEM private key found in {key_path}"))?;
+  let key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(&key_pem)
+    .map_err(|e| anyhow::anyhow!("parsing private key from {key_path}: {e}"))?;
 
   CertifiedKey::from_der(certs, key, &ring_provider())
     .map_err(|e| anyhow::anyhow!("certificate/key pair is not usable: {e}"))
@@ -116,8 +115,8 @@ pub fn reloading_server_config(
       let ca_pem = std::fs::read(ca_path)?;
       let mut roots = RootCertStore::empty();
       let (added, _) = roots.add_parsable_certificates(
-        rustls_pemfile::certs(&mut ca_pem.as_slice())
-          .collect::<Result<Vec<_>, io::Error>>()
+        CertificateDer::pem_slice_iter(&ca_pem)
+          .collect::<Result<Vec<_>, _>>()
           .map_err(|e| anyhow::anyhow!("parsing CA certificates from {ca_path}: {e}"))?,
       );
       if added == 0 {
