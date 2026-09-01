@@ -1,7 +1,9 @@
 # Multi-arch release Dockerfile
 # Expects pre-built binaries in binaries/linux/{amd64,arm64}/
 
-FROM debian:trixie-slim@sha256:8deff97fa2b0aea5fb95d7bdc43cdfba2d789d5dd119749c65fb62bc68e5229a
+# Pin the image-index digest — a child-manifest digest can resolve to an
+# attestation manifest (platform unknown/unknown), which BuildKit cannot run.
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
 ARG TARGETARCH
 
