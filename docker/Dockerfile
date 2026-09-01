@@ -4,6 +4,7 @@
 
 # Stage 1: Plan dependencies
 FROM rust:1.97-alpine3.23@sha256:c4a364ddbf684fe038e6fa6a4f25b30c8dc85247423e0e660676ece0d17be4a2 AS planner
+RUN apk upgrade --no-cache libcrypto3 libssl3
 RUN cargo install cargo-chef --locked
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -12,6 +13,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2: Cache dependencies
 FROM rust:1.97-alpine3.23@sha256:c4a364ddbf684fe038e6fa6a4f25b30c8dc85247423e0e660676ece0d17be4a2 AS cacher
+RUN apk upgrade --no-cache libcrypto3 libssl3
 RUN apk add --no-cache musl-dev
 RUN cargo install cargo-chef --locked
 WORKDIR /build
@@ -21,6 +23,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Stage 3: Build application
 FROM rust:1.97-alpine3.23@sha256:c4a364ddbf684fe038e6fa6a4f25b30c8dc85247423e0e660676ece0d17be4a2 AS builder
+RUN apk upgrade --no-cache libcrypto3 libssl3
 RUN apk add --no-cache musl-dev
 WORKDIR /build
 # Copy cached dependencies
@@ -36,7 +39,7 @@ RUN cargo build --release --package sagitta
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 
 # Install minimal runtime dependencies
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates && apk upgrade --no-cache libcrypto3 libssl3
 
 # Copy binary from builder
 COPY --from=builder /build/target/release/sagitta /usr/local/bin/sagitta
