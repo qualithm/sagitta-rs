@@ -36,7 +36,7 @@ RUN cargo build --release --package sagitta
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 # Install minimal runtime dependencies
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates && apk upgrade --no-cache libcrypto3 libssl3
 
 # Copy binary from builder
 COPY --from=builder /build/target/release/sagitta /usr/local/bin/sagitta
