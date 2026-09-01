@@ -3,8 +3,7 @@
 # Use Dockerfile.release for production with pre-built binaries
 
 # Stage 1: Plan dependencies
-FROM rust:1.97-alpine3.23@sha256:c4a364ddbf684fe038e6fa6a4f25b30c8dc85247423e0e660676ece0d17be4a2 AS planner
-RUN apk upgrade --no-cache libcrypto3 libssl3
+FROM rust:1.97-alpine3.24@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900 AS planner
 RUN cargo install cargo-chef --locked
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -12,8 +11,7 @@ COPY crates ./crates
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2: Cache dependencies
-FROM rust:1.97-alpine3.23@sha256:c4a364ddbf684fe038e6fa6a4f25b30c8dc85247423e0e660676ece0d17be4a2 AS cacher
-RUN apk upgrade --no-cache libcrypto3 libssl3
+FROM rust:1.97-alpine3.24@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900 AS cacher
 RUN apk add --no-cache musl-dev
 RUN cargo install cargo-chef --locked
 WORKDIR /build
@@ -22,8 +20,7 @@ COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Stage 3: Build application
-FROM rust:1.97-alpine3.23@sha256:c4a364ddbf684fe038e6fa6a4f25b30c8dc85247423e0e660676ece0d17be4a2 AS builder
-RUN apk upgrade --no-cache libcrypto3 libssl3
+FROM rust:1.97-alpine3.24@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900 AS builder
 RUN apk add --no-cache musl-dev
 WORKDIR /build
 # Copy cached dependencies
@@ -36,7 +33,7 @@ COPY crates ./crates
 RUN cargo build --release --package sagitta
 
 # Runtime stage
-FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 # Install minimal runtime dependencies
 RUN apk add --no-cache ca-certificates && apk upgrade --no-cache libcrypto3 libssl3

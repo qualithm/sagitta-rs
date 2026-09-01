@@ -35,6 +35,13 @@ jobs:
             cat "${{ steps.audit.outputs.body-file }}"
             echo "IMAGE_AUDIT_BODY_EOF"
           } >> "$GITHUB_OUTPUT"
+      - name: Create app token for pm issue filing
+        id: app-token
+        uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2.0.6
+        with:
+          app-id: ${{ secrets.PROJECTS_GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECTS_GH_APP_PRIVATE_KEY }}
+          owner: qualithm
       - name: Report findings
         if: steps.audit.outputs.clean == 'false'
         uses: ./.github/actions/report-scan-failure
@@ -43,7 +50,7 @@ jobs:
           title:
             "${{ github.event.repository.name }}: image audit found outdated or vulnerable images"
           body: ${{ steps.report.outputs.body }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
       - name: Resolve stale findings issue
         if: steps.audit.outputs.clean == 'true'
         uses: ./.github/actions/report-scan-failure
@@ -51,6 +58,6 @@ jobs:
           mode: resolve
           title:
             "${{ github.event.repository.name }}: image audit found outdated or vulnerable images"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
       # Findings are advisory: the job never fails on them, the tracking issue
       # is the report (Decision https://github.com/orgs/qualithm/discussions/232).
