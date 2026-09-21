@@ -583,11 +583,15 @@ mod tests {
     let before = presented_cert(addr, &cert_path, "first").await;
 
     // Rotate the files; retry the connect until the resolver reflects the new
-    // file — each connect unconditionally succeeds, so disqualify "before" and
-    // win only when the resolver picked up "second".
+    // file — each connect unconditionally succeeds (the new leaf is never a
+    // disconnect reason), so disqualify "before" and win only when the
+    // resolver picked up "second".
     write_self_signed(&cert_path, &key_path, "second");
+    // Small bound between the write and the first tick so the file's mtime
+    // is past the resolver's last-snapshot mtime.
+    tokio::time::sleep(Duration::from_millis(10)).await;
     let mut after = before.clone();
-    for _ in 0..50 {
+    for _ in 0..300 {
       tokio::time::sleep(Duration::from_millis(100)).await;
       if let Ok(leaf) = try_presented_cert(addr, &cert_path, "second").await
         && leaf != before
