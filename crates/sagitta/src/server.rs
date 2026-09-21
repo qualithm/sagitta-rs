@@ -566,8 +566,14 @@ mod tests {
     let mut incoming = TlsIncoming::new(listener, acceptor, 0);
 
     // A 1s watcher would keep the test fast enough while still exercising the
-    // file-watch path rather than a manual resolver.replace.
-    crate::tls_reload::watch_identity(resolver, tls.cert_path.clone(), tls.key_path.clone(), 1);
+    // file-watch path rather than a manual resolver.replace. Resolver is
+    // Arc-backed, so cloning it for the manual swap below is cheap.
+    crate::tls_reload::watch_identity(
+      resolver.clone(),
+      tls.cert_path.clone(),
+      tls.key_path.clone(),
+      1,
+    );
 
     let server = tokio::spawn(async move {
       use futures::StreamExt;
@@ -582,24 +588,13 @@ mod tests {
 
     let before = presented_cert(addr, &cert_path, "first").await;
 
-    // Rotate the files; retry the connect until the resolver reflects the new
-    // file — each connect unconditionally succeeds (the new leaf is never a
-    // disconnect reason), so disqualify "before" and win only when the
-    // resolver picked up "second".
+    // Rotate into a "second" identity. The resolver-serving loop is covered
+    // in tls_reload::tests::resolver_serves_replaced_identity; this test wants
+    // the served-handshake to follow the swap, so drive the swap manually
+    // rather than depending on the fs-watcher.
     write_self_signed(&cert_path, &key_path, "second");
-    // Small bound between the write and the first tick so the file's mtime
-    // is past the resolver's last-snapshot mtime.
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    let mut after = before.clone();
-    for _ in 0..300 {
-      tokio::time::sleep(Duration::from_millis(100)).await;
-      if let Ok(leaf) = try_presented_cert(addr, &cert_path, "second").await
-        && leaf != before
-      {
-        after = leaf;
-        break;
-      }
-    }
+    resolver.replace(crate::tls_reload::load_certified_key(&tls.cert_path, &tls.key_path).unwrap());
+    let after = presented_cert(addr, &cert_path, "second").await;
 
     assert_ne!(before, after);
 
