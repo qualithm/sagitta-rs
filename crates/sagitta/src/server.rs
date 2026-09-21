@@ -582,10 +582,18 @@ mod tests {
 
     let before = presented_cert(addr, &cert_path, "first").await;
 
-    // Rotate the files; wait past one watcher tick, then reconnect.
+    // Rotate the files; retry the connect so a server-side watcher that hasn't
+    // caught the new file yet still satisfies the assertion. 1s resolver scan
+    // interval means one retry per 100ms covers it.
     write_self_signed(&cert_path, &key_path, "second");
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-    let after = presented_cert(addr, &cert_path, "second").await;
+    let mut after = before.clone();
+    for _ in 0..50 {
+      tokio::time::sleep(Duration::from_millis(100)).await;
+      if let Ok(leaf) = try_presented_cert(addr, &cert_path, "second").await {
+        after = leaf;
+        break;
+      }
+    }
 
     assert_ne!(before, after);
 
@@ -593,36 +601,50 @@ mod tests {
   }
 
   /// Connect with a client that trusts whatever `ca_cert_path` currently holds
-  /// and return the leaf the server presented.
+  /// and return the leaf the server presented. Panics on any failure.
   async fn presented_cert(
     addr: SocketAddr,
     ca_cert_path: &std::path::Path,
     server_name: &str,
   ) -> rustls::pki_types::CertificateDer<'static> {
+    try_presented_cert(addr, ca_cert_path, server_name)
+      .await
+      .expect("connect failed")
+  }
+
+  /// Like `presented_cert`, but returns Result so retry loops can treat a
+  /// resolver that hasn't caught the rewritten file yet as transient.
+  async fn try_presented_cert(
+    addr: SocketAddr,
+    ca_cert_path: &std::path::Path,
+    server_name: &str,
+  ) -> Result<rustls::pki_types::CertificateDer<'static>, Box<dyn std::error::Error + Send + Sync>>
+  {
     use rustls::pki_types::ServerName;
     use rustls::pki_types::pem::PemObject;
 
-    let certs = std::fs::read(ca_cert_path).unwrap();
+    let certs = std::fs::read(ca_cert_path)?;
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&certs) {
-      roots.add(cert.unwrap()).unwrap();
+      roots.add(cert?)?;
     }
     let client_config = rustls::ClientConfig::builder()
       .with_root_certificates(roots)
       .with_no_client_auth();
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
-    let tcp = TcpStream::connect(addr).await.unwrap();
+    let tcp = TcpStream::connect(addr).await?;
     let tls_stream = connector
-      .connect(ServerName::try_from(server_name.to_string()).unwrap(), tcp)
-      .await
-      .unwrap();
+      .connect(ServerName::try_from(server_name.to_string())?, tcp)
+      .await?;
     let (_, session) = tls_stream.get_ref();
-    session
-      .peer_certificates()
-      .unwrap()
-      .first()
-      .unwrap()
-      .clone()
+    Ok(
+      session
+        .peer_certificates()
+        .ok_or("no peer certs")?
+        .first()
+        .ok_or("no leaf")?
+        .clone(),
+    )
   }
 
   fn write_self_signed(cert_path: &std::path::Path, key_path: &std::path::Path, cn: &str) {
