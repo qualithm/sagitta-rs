@@ -582,16 +582,18 @@ mod tests {
 
     let before = presented_cert(addr, &cert_path, "first").await;
 
-    // Rotate the files; retry the connect so a server-side watcher that hasn't
-    // caught the new file yet still satisfies the assertion. 1s resolver scan
-    // interval means one retry per 100ms covers it.
+    // Rotate the files; retry the connect until the resolver reflects the new
+    // file — each connect unconditionally succeeds, so disqualify "before" and
+    // win only when the resolver picked up "second".
     write_self_signed(&cert_path, &key_path, "second");
     let mut after = before.clone();
     for _ in 0..50 {
       tokio::time::sleep(Duration::from_millis(100)).await;
       if let Ok(leaf) = try_presented_cert(addr, &cert_path, "second").await {
-        after = leaf;
-        break;
+        if leaf != before {
+          after = leaf;
+          break;
+        }
       }
     }
 
