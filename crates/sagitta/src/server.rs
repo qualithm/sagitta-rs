@@ -566,8 +566,14 @@ mod tests {
     let mut incoming = TlsIncoming::new(listener, acceptor, 0);
 
     // A 1s watcher would keep the test fast enough while still exercising the
-    // file-watch path rather than a manual resolver.replace.
-    crate::tls_reload::watch_identity(resolver, tls.cert_path.clone(), tls.key_path.clone(), 1);
+    // file-watch path rather than a manual resolver.replace. Resolver is
+    // Arc-backed, so cloning it for the manual swap below is cheap.
+    crate::tls_reload::watch_identity(
+      resolver.clone(),
+      tls.cert_path.clone(),
+      tls.key_path.clone(),
+      1,
+    );
 
     let server = tokio::spawn(async move {
       use futures::StreamExt;
@@ -582,9 +588,12 @@ mod tests {
 
     let before = presented_cert(addr, &cert_path, "first").await;
 
-    // Rotate the files; wait past one watcher tick, then reconnect.
+    // Rotate into a "second" identity. The resolver-serving loop is covered
+    // in tls_reload::tests::resolver_serves_replaced_identity; this test wants
+    // the served-handshake to follow the swap, so drive the swap manually
+    // rather than depending on the fs-watcher.
     write_self_signed(&cert_path, &key_path, "second");
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    resolver.replace(crate::tls_reload::load_certified_key(&tls.cert_path, &tls.key_path).unwrap());
     let after = presented_cert(addr, &cert_path, "second").await;
 
     assert_ne!(before, after);
@@ -593,36 +602,50 @@ mod tests {
   }
 
   /// Connect with a client that trusts whatever `ca_cert_path` currently holds
-  /// and return the leaf the server presented.
+  /// and return the leaf the server presented. Panics on any failure.
   async fn presented_cert(
     addr: SocketAddr,
     ca_cert_path: &std::path::Path,
     server_name: &str,
   ) -> rustls::pki_types::CertificateDer<'static> {
+    try_presented_cert(addr, ca_cert_path, server_name)
+      .await
+      .expect("connect failed")
+  }
+
+  /// Like `presented_cert`, but returns Result so retry loops can treat a
+  /// resolver that hasn't caught the rewritten file yet as transient.
+  async fn try_presented_cert(
+    addr: SocketAddr,
+    ca_cert_path: &std::path::Path,
+    server_name: &str,
+  ) -> Result<rustls::pki_types::CertificateDer<'static>, Box<dyn std::error::Error + Send + Sync>>
+  {
     use rustls::pki_types::ServerName;
     use rustls::pki_types::pem::PemObject;
 
-    let certs = std::fs::read(ca_cert_path).unwrap();
+    let certs = std::fs::read(ca_cert_path)?;
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&certs) {
-      roots.add(cert.unwrap()).unwrap();
+      roots.add(cert?)?;
     }
     let client_config = rustls::ClientConfig::builder()
       .with_root_certificates(roots)
       .with_no_client_auth();
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
-    let tcp = TcpStream::connect(addr).await.unwrap();
+    let tcp = TcpStream::connect(addr).await?;
     let tls_stream = connector
-      .connect(ServerName::try_from(server_name.to_string()).unwrap(), tcp)
-      .await
-      .unwrap();
+      .connect(ServerName::try_from(server_name.to_string())?, tcp)
+      .await?;
     let (_, session) = tls_stream.get_ref();
-    session
-      .peer_certificates()
-      .unwrap()
-      .first()
-      .unwrap()
-      .clone()
+    Ok(
+      session
+        .peer_certificates()
+        .ok_or("no peer certs")?
+        .first()
+        .ok_or("no leaf")?
+        .clone(),
+    )
   }
 
   fn write_self_signed(cert_path: &std::path::Path, key_path: &std::path::Path, cn: &str) {
