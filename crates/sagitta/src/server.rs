@@ -589,11 +589,11 @@ mod tests {
     let mut after = before.clone();
     for _ in 0..50 {
       tokio::time::sleep(Duration::from_millis(100)).await;
-      if let Ok(leaf) = try_presented_cert(addr, &cert_path, "second").await {
-        if leaf != before {
-          after = leaf;
-          break;
-        }
+      if let Ok(leaf) = try_presented_cert(addr, &cert_path, "second").await
+        && leaf != before
+      {
+        after = leaf;
+        break;
       }
     }
 
