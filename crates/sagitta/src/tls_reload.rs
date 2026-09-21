@@ -43,7 +43,7 @@ impl ReloadingCertResolver {
   }
 
   /// Swap in a freshly loaded identity.
-  fn replace(&self, identity: CertifiedKey) {
+  pub(crate) fn replace(&self, identity: CertifiedKey) {
     let mut guard = self.active.write().expect("cert resolver lock poisoned");
     *guard = Arc::new(identity);
   }
@@ -79,7 +79,7 @@ fn ring_provider() -> Arc<rustls::crypto::CryptoProvider> {
 }
 
 /// Load a certificate chain and private key from PEM files.
-fn load_certified_key(cert_path: &str, key_path: &str) -> anyhow::Result<CertifiedKey> {
+pub(crate) fn load_certified_key(cert_path: &str, key_path: &str) -> anyhow::Result<CertifiedKey> {
   let cert_pem = std::fs::read(cert_path)?;
   let key_pem = std::fs::read(key_path)?;
 
