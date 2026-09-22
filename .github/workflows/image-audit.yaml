@@ -15,7 +15,7 @@ permissions:
 jobs:
   audit:
     name: Image Audit
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: updatecli/updatecli-action@d422ba543720d01a96d4c3e3ab8544cc188cd711 # v3.5.0
@@ -37,9 +37,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Create app token for pm issue filing
         id: app-token
-        uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2.0.6
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.PROJECTS_GH_APP_CLIENT_ID }}
+          client-id: ${{ secrets.PROJECTS_GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.PROJECTS_GH_APP_PRIVATE_KEY }}
           owner: qualithm
       - name: Report findings
