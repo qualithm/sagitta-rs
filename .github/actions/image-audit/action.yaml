@@ -6,7 +6,7 @@ description: >
   reference carries fixable vulnerabilities. Both are reported because they are independent: a fully
   current image can still be vulnerable, and upgrading does not always remediate. Nothing is ever
   rewritten — upgrades are a human decision (Decision
-  https://github.com/orgs/qualithm/discussions/232).
+  https://github.com/qualithm/pm/discussions/744).
 inputs:
   mode:
     description: >
