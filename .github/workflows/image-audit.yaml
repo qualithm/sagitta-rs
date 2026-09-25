@@ -60,4 +60,4 @@ jobs:
             "${{ github.event.repository.name }}: image audit found outdated or vulnerable images"
           github-token: ${{ steps.app-token.outputs.token }}
       # Findings are advisory: the job never fails on them, the tracking issue
-      # is the report (Decision https://github.com/orgs/qualithm/discussions/232).
+      # is the report (Decision https://github.com/qualithm/pm/discussions/744).
