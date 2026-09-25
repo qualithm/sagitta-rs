@@ -6,7 +6,7 @@
 # and whether the pinned reference carries fixable HIGH/CRITICAL vulnerabilities.
 # Both are needed — a fully current image can still be vulnerable, and upgrading
 # does not always remediate. Nothing is ever rewritten; see Decision
-# https://github.com/orgs/qualithm/discussions/232.
+# https://github.com/qualithm/pm/discussions/744.
 set -euo pipefail
 
 : "${MODE:?}"
@@ -272,7 +272,7 @@ done < "$work/charts.tsv"
   echo "- \`CVEs after upgrade\` is the candidate's count: equal or higher means upgrading is not the remedy."
   echo "- A row marked _current_ is on the newest version and still vulnerable — no upgrade will help."
   echo "- Nothing is changed automatically; upgrades are a human call (Decision"
-  echo "  <https://github.com/orgs/qualithm/discussions/232>)."
+  echo "  <https://github.com/qualithm/pm/discussions/744>)."
   if grep -q 'oci://' "$work/charts.tsv" 2>/dev/null; then
     echo "- OCI-hosted chart dependencies are not version-checked yet and are omitted."
   fi
