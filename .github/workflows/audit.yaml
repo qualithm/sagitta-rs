@@ -32,6 +32,10 @@ jobs:
               | sed 's/#.*//' | grep -oE 'RUSTSEC-[0-9]+-[0-9]+' | sort -u | paste -sd, -
           )
           echo "advisories=${ids}" >> "$GITHUB_OUTPUT"
+      # audit-check installs cargo-audit unlocked, which breaks whenever a fresh dependency
+      # outruns the runner's rustc; pre-install locked so it finds the binary instead.
+      - name: Install cargo-audit
+        run: command -v cargo-audit || cargo install cargo-audit --locked
       - name: RustSec audit
         id: scan
         continue-on-error: true
