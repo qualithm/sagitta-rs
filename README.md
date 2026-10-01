@@ -131,7 +131,7 @@ cargo run --example custom_server
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (stable toolchain, 1.95+)
+- [Rust](https://rustup.rs/) (stable toolchain, 1.98+)
 
 ### Building
 
@@ -174,7 +174,7 @@ docker compose -f docker/docker-compose.yaml down
 
 ## Minimum Supported Rust Version
 
-Rust 1.95+ (edition 2024).
+Rust 1.98+ (edition 2024).
 
 ## License
 
