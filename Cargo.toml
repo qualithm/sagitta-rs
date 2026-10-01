@@ -8,7 +8,7 @@ edition = "2024"
 description = "Rust framework for building analytical data services on Arrow Flight and DataFusion."
 license = "Apache-2.0"
 repository = "https://github.com/qualithm/sagitta-rs"
-rust-version = "1.95"
+rust-version = "1.98"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
