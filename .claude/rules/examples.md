@@ -1,6 +1,7 @@
 ---
 description: "Conventions for runnable example binaries"
-applyTo: "crates/*/examples/**"
+paths:
+  - "crates/*/examples/**"
 ---
 
 # Example Conventions

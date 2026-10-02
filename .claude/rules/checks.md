@@ -1,5 +1,4 @@
 ---
-applyTo: "**"
 description: "Exact pre-commit commands for the rust-lib CI archetype, kept in sync with ci.yaml"
 ---
 
