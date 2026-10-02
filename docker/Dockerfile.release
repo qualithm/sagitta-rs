@@ -11,8 +11,10 @@ ARG TARGETARCH
 ARG BINARY_NAME=sagitta
 ENV BINARY_NAME=${BINARY_NAME}
 
-# Install minimal runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install minimal runtime dependencies. Upgrade first so Debian security fixes
+# land without waiting for upstream to rebuild the pinned base image.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     ca-certificates \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
