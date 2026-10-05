@@ -131,11 +131,11 @@ jobs:
 
       - name: Test image runs
         run: |
-          docker run --rm ${{ env.IMAGE }}:sha-${GITHUB_SHA::7} --help || echo "Binary executed (may exit non-zero without config)"
+          docker run --rm "${{ env.IMAGE }}:sha-${GITHUB_SHA::7}" --help || echo "Binary executed (may exit non-zero without config)"
 
       - name: Test image health
         run: |
-          docker run --rm --entrypoint /bin/sh ${{ env.IMAGE }}:sha-${GITHUB_SHA::7} -c "test -x /usr/local/bin/${{ env.BINARY_NAME }}"
+          docker run --rm --entrypoint /bin/sh "${{ env.IMAGE }}:sha-${GITHUB_SHA::7}" -c "test -x /usr/local/bin/${{ env.BINARY_NAME }}"
 
   publish-crate:
     name: Publish to crates.io
@@ -169,14 +169,14 @@ jobs:
           set -euo pipefail
           CRATE_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "${{ env.BINARY_NAME }}") | .name')
           CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "${{ env.BINARY_NAME }}") | .version')
-          echo "crate=$CRATE_NAME@$CRATE_VERSION" >> $GITHUB_OUTPUT
+          echo "crate=$CRATE_NAME@$CRATE_VERSION" >> "$GITHUB_OUTPUT"
 
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "User-Agent: github-actions/${{ github.repository }}" "https://crates.io/api/v1/crates/$CRATE_NAME/$CRATE_VERSION")
           if [ "$HTTP_STATUS" = "200" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "::notice::$CRATE_NAME@$CRATE_VERSION already published, skipping"
           elif [ "$HTTP_STATUS" = "404" ]; then
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "::notice::$CRATE_NAME@$CRATE_VERSION not found, will publish"
           else
             echo "::error::Unexpected HTTP status $HTTP_STATUS from crates.io API"
