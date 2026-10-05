@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "run": "cargo fmt --all -- --check",
+      "timeout": "10m",
+      "dir": "."
+    },
+    {
+      "run": "cargo check --workspace --all-targets",
+      "timeout": "10m",
+      "dir": "."
+    },
+    {
+      "run": "cargo clippy --workspace --all-targets -- -D warnings",
+      "timeout": "10m",
+      "dir": "."
+    },
+    {
+      "run": "cargo test --workspace",
+      "timeout": "10m",
+      "dir": "."
+    }
+  ]
+}
