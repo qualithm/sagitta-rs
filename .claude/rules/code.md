@@ -1,279 +1,48 @@
 # Rust Code Guidelines
 
-## General
+`cargo fmt` and `cargo clippy` enforce formatting, naming and most idioms. Fix what they flag; this
+file covers what they can't.
 
-- Use the current stable Rust edition
-- Lowercase error messages with no trailing punctuation
-- Run `cargo fmt` before committing
-- Run `cargo clippy` and address all warnings
-- Use `anyhow::Result` in binaries, `thiserror` in libraries
+## Layout
 
-## When Code Changes
+- Group `use` statements std → external crates → workspace crates → `crate::`, with a blank line
+  between groups. Prefer `crate::` paths over `super::` and explicit imports over globs.
+- `lib.rs` holds module exports, `config.rs` config structs and defaults, `error.rs` error types.
+  Depend on workspace dependencies (`tokio = { workspace = true }`).
+- Unit tests sit in the same file under `#[cfg(test)] mod tests`; integration tests in the crate's
+  `tests/`; benchmarks use `criterion` in `benches/`. Use `tempfile` for temporary directories.
 
-Any code change should include review of:
+## Errors
 
-- **Tests** - update existing tests, add new tests for new behavior
-- **Benchmarks** - update if performance characteristics change
-- **Documentation** - update doc comments if public API changes
-- **Error messages** - ensure they remain accurate and helpful
-- **Configuration** - update defaults, env vars, or config files if affected
-- **Dependencies** - check for unused deps after removing code
+- `thiserror` enums (`{Component}Error`) in libraries, `anyhow::Result` in binaries. Messages are
+  lowercase with no trailing punctuation. Use `#[from]` and `?`; prefer `Result` over panics.
+- Public APIs carry `///` docs, brief, with `# Errors` when returning `Result` and `# Panics` when
+  they can panic. Module docs are one line (`//! HTTP client utilities.`). No architecture
+  overviews, ASCII diagrams, feature lists or how-to guides in comments.
 
-Run before committing: see `.claude/rules/checks.md` (synced from dx) for the exact commands this
-repo's CI enforces.
+## Runtime
 
-## Imports
+- Async runs on `tokio`.
+- Log with `tracing` macros and structured fields (`info!(count = n, "processed items")`); use
+  `#[instrument]` with `skip(...)` for sensitive or large arguments. Never `println!` in production
+  code.
+- Config structs are `{Component}Config` with `///` on each field, units in names or comments
+  (`timeout_ms`), and a `Default` impl with production values.
 
-**Order:** std → external crates → workspace crates → crate modules
+## When code changes
 
-```rust
-use std::collections::HashMap;
-use std::sync::Arc;
+A behavior change carries a test change; update benchmarks if performance changes, doc comments if
+the public API changes, and drop dependencies nothing uses.
 
-use tokio::sync::RwLock;
-use tracing::{info, instrument};
+## Environment variables
 
-use my_other_crate::SomeType;
+Adding or renaming an env var is a two-file change in one commit: declare it in `env-example` and
+classify it in `env-manifest.json` (a per-environment static, a `generate` recipe, or an `obtain`
+pointer to where the value comes from). Run `dx env local` before committing; it fails when a
+declared key is missing from the local `.env`. `*-example` template repos carry an empty
+`env-example` and no manifest.
 
-use crate::config::Config;
-use crate::error::Error;
-```
+## Generated files
 
-**Rules:**
-
-- Group imports by origin with blank lines between groups
-- Use `use crate::` for internal modules
-- Use `use super::` sparingly, prefer absolute paths
-- Prefer explicit imports over glob imports (`*`)
-- Combine imports from same module: `use std::sync::{Arc, Mutex}`
-
-## File Structure
-
-| Path        | Purpose                          |
-| ----------- | -------------------------------- |
-| `lib.rs`    | Module exports and re-exports    |
-| `main.rs`   | Binary entry point               |
-| `config.rs` | Configuration structs + defaults |
-| `error.rs`  | Error types using `thiserror`    |
-
-## Naming Conventions
-
-| Type                | Pattern             | Example                    |
-| ------------------- | ------------------- | -------------------------- |
-| Types/Structs/Enums | `PascalCase`        | `QueryEngine`, `AuthError` |
-| Functions/Methods   | `snake_case`        | `get_user`, `flush_buffer` |
-| Constants           | `SCREAMING_SNAKE`   | `DEFAULT_TIMEOUT_MS`       |
-| Modules             | `snake_case`        | `auth`, `storage`          |
-| Config structs      | `{Component}Config` | `ServerConfig`             |
-| Error enums         | `{Component}Error`  | `StorageError`             |
-
-## Comments and Documentation
-
-**Avoid comments that age poorly.** Stale documentation is worse than none.
-
-**Do not include:**
-
-- Overview/summary docs describing architecture
-- ASCII diagrams showing component relationships
-- Feature lists or "this module provides" enumerations
-- Example code blocks in module docs
-- "How to use" guides or run instructions
-
-**Do include:**
-
-- Single-line module descriptions: `//! HTTP client utilities.`
-- Implementation comments explaining non-obvious logic
-- `///` docs on public APIs describing parameters and return values
-- `# Errors` and `# Panics` sections where applicable
-
-## Error Handling
-
-Use `thiserror` for domain errors in libraries:
-
-```rust
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum StorageError {
-    #[error("file not found: {0}")]
-    NotFound(String),
-
-    #[error("permission denied")]
-    PermissionDenied,
-
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-}
-```
-
-**Rules:**
-
-- Error messages: lowercase, no trailing punctuation
-- Use `#[from]` for automatic conversion from underlying errors
-- Prefer `Result<T, E>` over panics
-- Use `?` for error propagation
-- Use `anyhow::Result` in binaries
-
-## Configuration Structs
-
-```rust
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
-    /// Port to listen on.
-    pub port: u16,
-
-    /// Request timeout in milliseconds.
-    pub timeout_ms: u64,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            port: 8080,
-            timeout_ms: 30_000,
-        }
-    }
-}
-```
-
-**Rules:**
-
-- Document each field with `///` comments
-- Include units in field names or comments (`_ms`, `_bytes`, `_secs`)
-- Implement `Default` with sensible production values
-
-## Component Pattern
-
-```rust
-pub struct Engine {
-    config: EngineConfig,
-}
-
-impl Engine {
-    pub fn new(config: EngineConfig) -> Self {
-        Self { config }
-    }
-
-    pub fn config(&self) -> &EngineConfig {
-        &self.config
-    }
-}
-```
-
-## Logging
-
-Use `tracing` for structured logging:
-
-```rust
-use tracing::{info, instrument};
-
-#[instrument(skip(db))]
-async fn fetch_user(db: &Database, id: u64) -> Result<User, Error> {
-    info!(user_id = id, "fetching user");
-    // ...
-}
-```
-
-**Rules:**
-
-- Use `tracing` macros: `trace!`, `debug!`, `info!`, `warn!`, `error!`
-- Use structured fields: `info!(count = n, "processed items")`
-- Use `#[instrument]` for automatic span creation
-- Use `skip(field)` to avoid logging sensitive or large data
-- Never use `println!` for logging in production code
-
-## Async
-
-Use `tokio` for async runtime:
-
-```rust
-use anyhow::Result;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
-    // ...
-
-    tokio::signal::ctrl_c().await?;
-    Ok(())
-}
-```
-
-## Dependencies
-
-Prefer workspace dependencies:
-
-```toml
-[dependencies]
-tokio = { workspace = true }
-tracing = { workspace = true }
-thiserror = { workspace = true }
-```
-
-## Testing
-
-Place unit tests in the same file:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_valid_input() {
-        let result = parse("valid");
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_async_operation() {
-        // ...
-    }
-}
-```
-
-**Rules:**
-
-- Use `rstest` for parameterised tests
-- Use `tempfile` for temporary directories
-- Use `criterion` for benchmarks (in `benches/`)
-
-## Public API Documentation
-
-```rust
-/// Fetch a user by ID.
-///
-/// # Errors
-///
-/// Returns `UserError::NotFound` if the user doesn't exist.
-pub async fn get_user(&self, id: u64) -> Result<User, UserError> {
-    // ...
-}
-```
-
-**Rules:**
-
-- Keep descriptions brief - one line if possible
-- Use `# Errors` section when returning `Result`
-- Use `# Panics` section if function can panic
-- Avoid `# Examples` unless genuinely non-obvious
-
-## Environment Variables
-
-Adding or renaming an env var is a two-file change: declare it in `env-example` and classify it in
-`env-manifest.json` (a per-environment static, a `generate` recipe, or an `obtain` pointer to the
-console where the value comes from) in the same commit. Run `dx env local` before committing an env
-change; it fails when a declared key is missing from the local `.env`. On a fresh machine,
-`dx env scaffold` writes a complete `.env` from the manifest — statics filled, generators run,
-`obtain` vars printed as a checklist.
-
-`*-example` template repos are excluded: they carry an empty `env-example` and no manifest (the
-convention doesn't apply once forked).
-
-## CI & Branch Protection
-
-The `.github/workflows/ci.yaml` file is generated by `qualithm/dx` from
-`dx/ci-templates/<archetype>.yaml`. Do not edit it directly — change the template and run
-`dx ci sync` from the dx repo. Branch rulesets in `dx/rulesets/` enforce a single required status
-check named `CI Required`, supplied by the umbrella job at the end of the workflow.
+`.github/workflows/ci.yaml` is generated from `dx/ci-templates/`; change the template and run
+`dx ci sync` from dx, never edit it here. `CI Required` is the single required status check.
