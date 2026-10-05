@@ -58,25 +58,33 @@ impl StoreCatalog {
 
     if let Some(default_schemas) = catalog_schemas.remove(catalog_name) {
       for (schema_name, tables) in default_schemas {
-        let schema_provider = StoreSchema::new(store.clone(), tables);
+        let schema_provider = StoreSchema::new(store.clone(), tables).with_store_lookup(
+          Self::schema_prefixes(&schema_name, catalog_name, default_schema),
+        );
         schemas.insert(schema_name, Arc::new(schema_provider));
       }
     }
 
+    let empty_schema = |schema_name: &str| -> Arc<dyn SchemaProvider> {
+      Arc::new(
+        StoreSchema::new(store.clone(), vec![]).with_store_lookup(Self::schema_prefixes(
+          schema_name,
+          catalog_name,
+          default_schema,
+        )),
+      )
+    };
+
     // Ensure the default schema exists even if empty
-    if !schemas.contains_key(default_schema) {
-      schemas.insert(
-        default_schema.to_string(),
-        Arc::new(StoreSchema::new(store.clone(), vec![])),
-      );
-    }
+    schemas
+      .entry(default_schema.to_string())
+      .or_insert_with(|| empty_schema(default_schema));
 
     // Include explicitly created schemas from the store
     if let Ok(explicit_schemas) = store.list_schemas().await {
       for schema_name in explicit_schemas {
-        schemas
-          .entry(schema_name)
-          .or_insert_with(|| Arc::new(StoreSchema::new(store.clone(), vec![])));
+        let provider = empty_schema(&schema_name);
+        schemas.entry(schema_name).or_insert(provider);
       }
     }
 
@@ -84,6 +92,22 @@ impl StoreCatalog {
       name: catalog_name.to_string(),
       schemas,
     }
+  }
+
+  /// Every [`DataPath`] prefix that [`Self::path_to_catalog_schema_table`] maps
+  /// into `schema_name` of `catalog_name`, so a table name can be resolved back
+  /// to its path.
+  fn schema_prefixes(
+    schema_name: &str,
+    catalog_name: &str,
+    default_schema: &str,
+  ) -> Vec<Vec<String>> {
+    let mut prefixes = vec![vec![schema_name.to_string()]];
+    if schema_name == default_schema {
+      prefixes.push(vec![]);
+    }
+    prefixes.push(vec![catalog_name.to_string(), schema_name.to_string()]);
+    prefixes
   }
 
   /// Convert a DataPath to (catalog, schema, table) tuple.
@@ -153,6 +177,9 @@ pub struct StoreSchema {
   store: Arc<dyn Store>,
   /// Tables backed by Store
   tables: HashMap<String, DataPath>,
+  /// Path prefixes probed in the store for a table missing from `tables`, so a
+  /// table created after this schema was built still resolves
+  lookup_prefixes: Vec<Vec<String>>,
   /// Dynamically registered tables/views (not backed by Store)
   dynamic_tables: RwLock<HashMap<String, Arc<dyn TableProvider>>>,
 }
@@ -164,8 +191,35 @@ impl StoreSchema {
     Self {
       store,
       tables,
+      lookup_prefixes: Vec::new(),
       dynamic_tables: RwLock::new(HashMap::new()),
     }
+  }
+
+  /// Resolve a table missing from the initial listing by probing the store at
+  /// each of `prefixes` followed by the table name, in order.
+  #[must_use]
+  pub fn with_store_lookup(mut self, prefixes: Vec<Vec<String>>) -> Self {
+    self.lookup_prefixes = prefixes;
+    self
+  }
+
+  /// The store path of a table created after this schema was built, if any.
+  async fn lookup_in_store(&self, name: &str) -> DfResult<Option<DataPath>> {
+    for prefix in &self.lookup_prefixes {
+      let mut segments = prefix.clone();
+      segments.push(name.to_string());
+      let path = DataPath::from(segments);
+      let exists = self
+        .store
+        .contains(&path)
+        .await
+        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+      if exists {
+        return Ok(Some(path));
+      }
+    }
+    Ok(None)
   }
 }
 
@@ -197,6 +251,14 @@ impl SchemaProvider for StoreSchema {
       && let Some(provider) = dynamic.get(name)
     {
       return Ok(Some(provider.clone()));
+    }
+
+    // Finally ask the store, which may hold a table created since this schema
+    // was built, e.g. by another node sharing the same backing catalog
+    if let Some(path) = self.lookup_in_store(name).await? {
+      debug!(table = %name, path = %path.display(), "resolved table from store");
+      let provider = StoreTableProvider::new(self.store.clone(), path).await?;
+      return Ok(Some(Arc::new(provider)));
     }
 
     Ok(None)
@@ -381,5 +443,43 @@ mod tests {
 
     let missing = schema.table("nonexistent").await.unwrap();
     assert!(missing.is_none());
+  }
+
+  #[tokio::test]
+  async fn test_schema_resolves_tables_created_after_build() {
+    let store = create_test_store().await;
+    let catalog = StoreCatalog::new(store.clone(), DEFAULT_CATALOG, DEFAULT_SCHEMA).await;
+    let late = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+
+    for path in [
+      vec!["late_default"],
+      vec!["myschema", "late_two"],
+      vec!["default", "myschema", "late_three"],
+    ] {
+      store
+        .put(DataPath::from(path), late.clone(), vec![])
+        .await
+        .unwrap();
+    }
+
+    let public = catalog.schema("public").unwrap();
+    assert!(public.table("late_default").await.unwrap().is_some());
+    let my_schema = catalog.schema("myschema").unwrap();
+    assert!(my_schema.table("late_two").await.unwrap().is_some());
+    assert!(my_schema.table("late_three").await.unwrap().is_some());
+    assert!(my_schema.table("late_default").await.unwrap().is_none());
+  }
+
+  #[tokio::test]
+  async fn test_schema_without_store_lookup_ignores_late_tables() {
+    let store = create_test_store().await;
+    let schema = StoreSchema::new(store.clone(), vec![]);
+    let late = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    store
+      .put(DataPath::from(vec!["late"]), late, vec![])
+      .await
+      .unwrap();
+
+    assert!(schema.table("late").await.unwrap().is_none());
   }
 }
