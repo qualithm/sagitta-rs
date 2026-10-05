@@ -22,7 +22,7 @@ Rust framework for building analytical data services on Arrow Flight and DataFus
 - **Custom actions** — extend `DoAction`/`ListActions` with application-specific handlers via the
   `CustomAction` trait
 - **TLS & mTLS** — optional transport security with configurable client certificate requirements
-- **Configuration** — TOML files with environment variable override (`SAGITTA_CONFIG`)
+- **Configuration** — a TOML file read from the `SAGITTA_CONFIG` path or `./sagitta.toml`
 - **Observability** — structured logging via `tracing`, health checks, graceful shutdown
 
 ## Installation
@@ -53,9 +53,7 @@ Add `sagitta` as a dependency and use `Sagitta` to build a custom server:
 ```rust
 use std::sync::Arc;
 
-use sagitta::{AccessLevel, Sagitta, Config, UserStore};
-use sagitta_core::InMemoryUserStore;
-use sagitta_store::MemoryStore;
+use sagitta::{AccessLevel, Config, InMemoryUserStore, MemoryStore, Sagitta, UserStore};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -84,21 +82,22 @@ async fn main() -> anyhow::Result<()> {
 
 See [sagitta.example.toml](sagitta.example.toml) for all options:
 
-| Section     | Key                     | Default         | Description                                |
-| ----------- | ----------------------- | --------------- | ------------------------------------------ |
-| _(root)_    | `listen_addr`           | `0.0.0.0:50051` | Server listen address                      |
-| _(root)_    | `catalog_name`          | `default`       | Catalog name for SQL queries               |
-| _(root)_    | `default_schema`        | `public`        | Default schema name                        |
-| _(root)_    | `enable_test_fixtures`  | `false`         | Load test datasets on startup              |
-| `[logging]` | `level`                 | `info`          | Log level (trace/debug/info/warn/error)    |
-| `[logging]` | `format`                | `pretty`        | Log format (`pretty` or `json`)            |
-| `[server]`  | `shutdown_timeout_secs` | `30`            | Graceful shutdown timeout                  |
-| `[server]`  | `tcp_keepalive_secs`    | `60`            | TCP keepalive interval (0 to disable)      |
-| `[server]`  | `max_connections`       | `0`             | Max concurrent connections (0 = unlimited) |
-| `[tls]`     | `cert_path`             | —               | Server certificate path                    |
-| `[tls]`     | `key_path`              | —               | Server private key path                    |
-| `[tls]`     | `ca_path`               | —               | CA certificate for mTLS                    |
-| `[tls]`     | `client_auth_optional`  | `false`         | Allow missing client certs in mTLS         |
+| Section     | Key                         | Default         | Description                                      |
+| ----------- | --------------------------- | --------------- | ------------------------------------------------ |
+| _(root)_    | `listen_addr`               | `0.0.0.0:50051` | Server listen address                            |
+| _(root)_    | `catalog_name`              | `default`       | Catalog name for SQL queries                     |
+| _(root)_    | `default_schema`            | `public`        | Default schema name                              |
+| _(root)_    | `enable_test_fixtures`      | `false`         | Load test datasets on startup                    |
+| `[logging]` | `level`                     | `info`          | Log level (trace/debug/info/warn/error)          |
+| `[logging]` | `format`                    | `pretty`        | Log format (`pretty` or `json`)                  |
+| `[server]`  | `shutdown_timeout_secs`     | `30`            | Graceful shutdown timeout                        |
+| `[server]`  | `tcp_keepalive_secs`        | `60`            | TCP keepalive interval (0 to disable)            |
+| `[server]`  | `max_connections`           | `0`             | Max concurrent connections (0 = unlimited)       |
+| `[tls]`     | `cert_path`                 | —               | Server certificate path                          |
+| `[tls]`     | `key_path`                  | —               | Server private key path                          |
+| `[tls]`     | `ca_path`                   | —               | CA certificate for mTLS                          |
+| `[tls]`     | `client_auth_optional`      | `false`         | Allow missing client certs in mTLS               |
+| `[tls]`     | `cert_reload_interval_secs` | `300`           | Certificate reload check interval (0 to disable) |
 
 ### Error Handling
 
