@@ -65,8 +65,9 @@ jobs:
       # at ~15G free and peak target/ is ~5G, so the ~60-115s cleanup freed ~19G the
       # job never needs. `doc` (below) has always run without it.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -93,8 +94,9 @@ jobs:
       # No "Free disk space" step: see the build job — measured headroom is
       # comfortable (dx#198). llvm-cov peaks at ~4G target/ against ~15G free.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
+          toolchain: stable
           components: llvm-tools-preview
       # Own cache key: llvm-cov adds -Cinstrument-coverage to RUSTFLAGS, which
       # invalidates every artifact built without it.
@@ -102,7 +104,9 @@ jobs:
         with:
           shared-key: "coverage"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-llvm-cov
       - run: cargo llvm-cov --workspace --lcov --output-path lcov.info
       - name: Enforce coverage threshold (>=80%)
         run: |
@@ -135,7 +139,9 @@ jobs:
       # --no-deps does no test/bench codegen, so its target/ footprint is the
       # smallest of any job — it never needed the cleanup the others dropped.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: "doc"
@@ -155,7 +161,9 @@ jobs:
       # No "Free disk space" step: see the build job — measured headroom is
       # comfortable (dx#198); release-profile benches peak well under the ~15G free.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
       # Own cache key: benchmarks build the release profile, which shares nothing
       # with the dev-profile artifacts the build job produces.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -194,7 +202,9 @@ jobs:
       # No "Free disk space" step: see the build job — measured headroom is
       # comfortable (dx#198); release-profile benches peak well under the ~15G free.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: "bench"
