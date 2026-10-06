@@ -25,7 +25,7 @@ jobs:
         run: |
           # cargo-deny reads deny.toml; the RustSec action below does not. Bridge the
           # repo's reviewed/justified ignore list into the audit so the two jobs
-          # agree (dx#380). Comments are stripped and IDs deduped; an absent or
+          # agree (qualithm/pm#405). Comments are stripped and IDs deduped; an absent or
           # empty list yields an empty ignore input.
           ids=$(
             awk '/^\[advisories\]/{a=1;next} /^\[/{a=0} a && $0 ~ /ignore/ && $0 ~ /\[/ {i=1; next} i && /^\]/{i=0} i' deny.toml \
