@@ -61,7 +61,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      # No "Free disk space" step: measured on varv-rs (dx#198), the runner starts
+      # No "Free disk space" step: measured on varv-rs (qualithm/pm#451), the runner starts
       # at ~15G free and peak target/ is ~5G, so the ~60-115s cleanup freed ~19G the
       # job never needs. `doc` (below) has always run without it.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -92,7 +92,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
-      # comfortable (dx#198). llvm-cov peaks at ~4G target/ against ~15G free.
+      # comfortable (qualithm/pm#451). llvm-cov peaks at ~4G target/ against ~15G free.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
@@ -201,7 +201,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
-      # comfortable (dx#198); release-profile benches peak well under the ~15G free.
+      # comfortable (qualithm/pm#451); release-profile benches peak well under the ~15G free.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
@@ -242,7 +242,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
-      # comfortable (dx#198); release-profile benches peak well under the ~15G free.
+      # comfortable (qualithm/pm#451); release-profile benches peak well under the ~15G free.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
