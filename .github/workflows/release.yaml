@@ -31,10 +31,10 @@ jobs:
         include:
           # Build on ubuntu-24.04 (GLIBC 2.39) for compatibility with debian:trixie-slim (GLIBC 2.41)
           - target: x86_64-unknown-linux-gnu
-            os: blacksmith-2vcpu-ubuntu-2404
+            os: ubuntu-24.04
             artifact: linux-amd64
           - target: aarch64-unknown-linux-gnu
-            os: blacksmith-2vcpu-ubuntu-2404-arm
+            os: ubuntu-24.04-arm
             artifact: linux-arm64
     steps:
       - name: Checkout
@@ -63,7 +63,7 @@ jobs:
 
   docker:
     name: Build Docker Image
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: build-binaries
     outputs:
@@ -87,10 +87,11 @@ jobs:
       - name: Make binaries executable
         run: chmod +x binaries/linux/*/${{ env.BINARY_NAME }}
 
-      - name: Set up Blacksmith Docker builder
-        uses: useblacksmith/setup-docker-builder@2068193c703dab9ecee787ac50d4f9100e57574a # v2.2.0
-        with:
-          cache-key: docker/Dockerfile.release
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Extract metadata
         id: meta
@@ -120,11 +121,13 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: docker/Dockerfile.release
           platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -141,7 +144,7 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     environment:
       name: crates-io
@@ -194,7 +197,7 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [docker, publish-crate]
     permissions:
