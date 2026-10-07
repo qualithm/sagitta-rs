@@ -25,6 +25,7 @@ jobs:
   build-binaries:
     name: Build Binary (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     strategy:
       matrix:
         include:
@@ -63,6 +64,7 @@ jobs:
   docker:
     name: Build Docker Image
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
     needs: build-binaries
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
@@ -140,6 +142,7 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
     environment:
       name: crates-io
     permissions:
@@ -192,6 +195,7 @@ jobs:
   github-release:
     name: Create GitHub Release
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
     needs: [docker, publish-crate]
     permissions:
       contents: write

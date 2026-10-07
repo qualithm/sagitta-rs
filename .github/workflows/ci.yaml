@@ -28,6 +28,7 @@ jobs:
   changes:
     name: Detect Changes
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
     outputs:
       code: ${{ steps.f.outputs.code }}
       is-main: ${{ steps.tier.outputs.is-main }}
@@ -62,6 +63,7 @@ jobs:
     # never seeds a cache any other branch can restore.
     if: needs.changes.outputs.code == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
     steps:
       # No "Free disk space" step: measured on varv-rs (qualithm/pm#451), the runner starts
       # at ~15G free and peak target/ is ~5G, so the ~60-115s cleanup freed ~19G the
@@ -92,6 +94,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
       # comfortable (qualithm/pm#451). llvm-cov peaks at ~4G target/ against ~15G free.
@@ -178,6 +181,7 @@ jobs:
     # is-main is also true on push to main, which is what seeds this cache key.
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.is-main == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
     steps:
       # No "Free disk space" step here either (see the build job): cargo doc
       # --no-deps does no test/bench codegen, so its target/ footprint is the
@@ -201,6 +205,7 @@ jobs:
       needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' &&
       needs.changes.outputs.is-main == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
       # comfortable (qualithm/pm#451); release-profile benches peak well under the ~15G free.
@@ -242,6 +247,7 @@ jobs:
       needs.changes.outputs.code == 'true' && github.event_name == 'push' && github.ref ==
       'refs/heads/main'
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
       # comfortable (qualithm/pm#451); release-profile benches peak well under the ~15G free.
@@ -279,6 +285,7 @@ jobs:
     # included: a README can carry an image reference too. Repos not enrolled
     # in dx images-sync.config carry no vendored registry and skip.
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Check image pins against the vendored dx registry
@@ -294,6 +301,7 @@ jobs:
     if: always()
     needs: [changes, build, coverage, doc, benchmark-regression, benchmarks, image-pins]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
     steps:
       - name: Verify dependent jobs
         env:
