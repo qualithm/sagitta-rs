@@ -16,6 +16,7 @@ jobs:
   audit:
     name: Security Advisory Check
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -71,6 +72,7 @@ jobs:
   deny:
     name: Dependency Audit (cargo-deny)
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
     steps:
       - name: Create app token for pm issue filing
         id: app-token
@@ -106,6 +108,7 @@ jobs:
   udeps:
     name: Unused Dependencies
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 30
     steps:
       - name: Create app token for pm issue filing
         id: app-token
