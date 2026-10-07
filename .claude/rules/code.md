@@ -31,8 +31,9 @@ file covers what they can't.
 
 ## When code changes
 
-A behavior change carries a test change; update benchmarks if performance changes, doc comments if
-the public API changes, and drop dependencies nothing uses.
+A behavior change carries tests that cover its new lines (`dx coverage patch` checks them after the
+coverage step); update benchmarks if performance changes, doc comments if the public API changes,
+and drop dependencies nothing uses.
 
 ## Environment variables
 
