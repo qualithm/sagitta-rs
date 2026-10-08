@@ -62,7 +62,7 @@ jobs:
     # that wrote them plus the default branch, so a job that never runs on main
     # never seeds a cache any other branch can restore.
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-8-core
     timeout-minutes: 30
     steps:
       # No "Free disk space" step: measured on varv-rs (qualithm/pm#451), the runner starts
@@ -93,7 +93,7 @@ jobs:
     name: Coverage
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-8-core
     timeout-minutes: 30
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
@@ -180,7 +180,7 @@ jobs:
     needs: changes
     # is-main is also true on push to main, which is what seeds this cache key.
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.is-main == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-8-core
     timeout-minutes: 30
     steps:
       # No "Free disk space" step here either (see the build job): cargo doc
@@ -204,7 +204,7 @@ jobs:
     if:
       needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' &&
       needs.changes.outputs.is-main == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-8-core
     timeout-minutes: 30
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
@@ -246,7 +246,7 @@ jobs:
     if:
       needs.changes.outputs.code == 'true' && github.event_name == 'push' && github.ref ==
       'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-8-core
     timeout-minutes: 30
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
