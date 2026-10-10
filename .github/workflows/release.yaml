@@ -31,7 +31,7 @@ jobs:
         include:
           # Build on ubuntu-24.04 (GLIBC 2.39) for compatibility with debian:trixie-slim (GLIBC 2.41)
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-24.04-8-core
+            os: ubuntu-24.04
             artifact: linux-amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
@@ -63,7 +63,7 @@ jobs:
 
   docker:
     name: Build Docker Image
-    runs-on: ubuntu-24.04-8-core
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: build-binaries
     outputs:
