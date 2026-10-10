@@ -62,8 +62,8 @@ jobs:
     # that wrote them plus the default branch, so a job that never runs on main
     # never seeds a cache any other branch can restore.
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04-8-core
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       # No "Free disk space" step: measured on varv-rs (qualithm/pm#451), the runner starts
       # at ~15G free and peak target/ is ~5G, so the ~60-115s cleanup freed ~19G the
@@ -93,8 +93,8 @@ jobs:
     name: Coverage
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04-8-core
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
       # comfortable (qualithm/pm#451). llvm-cov peaks at ~4G target/ against ~15G free.
@@ -180,8 +180,8 @@ jobs:
     needs: changes
     # is-main is also true on push to main, which is what seeds this cache key.
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.is-main == 'true'
-    runs-on: ubuntu-24.04-8-core
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       # No "Free disk space" step here either (see the build job): cargo doc
       # --no-deps does no test/bench codegen, so its target/ footprint is the
@@ -204,8 +204,8 @@ jobs:
     if:
       needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' &&
       needs.changes.outputs.is-main == 'true'
-    runs-on: ubuntu-24.04-8-core
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
       # comfortable (qualithm/pm#451); release-profile benches peak well under the ~15G free.
@@ -246,8 +246,8 @@ jobs:
     if:
       needs.changes.outputs.code == 'true' && github.event_name == 'push' && github.ref ==
       'refs/heads/main'
-    runs-on: ubuntu-24.04-8-core
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
       # comfortable (qualithm/pm#451); release-profile benches peak well under the ~15G free.
