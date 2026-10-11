@@ -17,6 +17,7 @@ use arrow_flight::sql::{
 use arrow_ipc::writer::IpcWriteOptions;
 use arrow_schema::{ArrowError, Field, Schema, SchemaRef};
 use bytes::Bytes;
+use datafusion::common::TableReference;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::logical_expr::{
   CreateCatalogSchema, CreateView, DdlStatement, DmlStatement, DropCatalogSchema, DropTable,
@@ -24,7 +25,6 @@ use datafusion::logical_expr::{
 };
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::prelude::{SessionConfig, SessionContext};
-use datafusion::sql::TableReference;
 use futures::Stream;
 use prost::Message;
 use tracing::{debug, info, warn};
@@ -1003,6 +1003,7 @@ impl SqlEngine {
 
             Ok((path, old_count))
           }
+          other => Err(unsupported_write_op(other)),
         }
       }
       LogicalPlan::Ddl(ddl) => self.execute_ddl(ddl).await,
@@ -3136,6 +3137,11 @@ impl SqlEngine {
     })?;
     Ok(transaction.savepoints.len())
   }
+}
+
+/// Error for a write operation this engine does not execute.
+fn unsupported_write_op(op: &WriteOp) -> SqlError {
+  SqlError::UnsupportedCommand(format!("unsupported write operation: {}", op.name()))
 }
 
 /// Create a TicketStatementQuery message for a query handle.
@@ -5634,6 +5640,13 @@ mod tests {
 
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), SqlError::TableNotFound(_)));
+  }
+
+  #[test]
+  fn test_unsupported_write_op_names_the_operation() {
+    let err = unsupported_write_op(&WriteOp::Delete);
+
+    assert!(matches!(&err, SqlError::UnsupportedCommand(msg) if msg.contains("Delete")));
   }
 
   // ===== ALTER TABLE ADD COLUMN Tests =====
