@@ -1,6 +1,5 @@
 //! DataFusion TableProvider implementation for Store.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use crate::DataPath;
@@ -58,10 +57,6 @@ impl std::fmt::Debug for StoreTableProvider {
 
 #[async_trait]
 impl TableProvider for StoreTableProvider {
-  fn as_any(&self) -> &dyn Any {
-    self
-  }
-
   fn schema(&self) -> SchemaRef {
     self.schema.clone()
   }
