@@ -2,7 +2,6 @@
 //!
 //! Provides proper `catalog.schema.table` support for SQL queries.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -147,10 +146,6 @@ impl StoreCatalog {
 }
 
 impl CatalogProvider for StoreCatalog {
-  fn as_any(&self) -> &dyn Any {
-    self
-  }
-
   fn schema_names(&self) -> Vec<String> {
     self.schemas.keys().cloned().collect()
   }
@@ -225,10 +220,6 @@ impl StoreSchema {
 
 #[async_trait]
 impl SchemaProvider for StoreSchema {
-  fn as_any(&self) -> &dyn Any {
-    self
-  }
-
   fn table_names(&self) -> Vec<String> {
     let mut names: Vec<String> = self.tables.keys().cloned().collect();
     if let Ok(dynamic) = self.dynamic_tables.read() {

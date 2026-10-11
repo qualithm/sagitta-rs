@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/sagitta"]
 
 [workspace.package]
-version = "0.1.20"
+version = "0.2.0"
 edition = "2024"
 description = "Rust framework for building analytical data services on Arrow Flight and DataFusion."
 license = "Apache-2.0"
@@ -17,4 +17,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 anyhow = "1"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-datafusion = "53"
+datafusion = "55"
