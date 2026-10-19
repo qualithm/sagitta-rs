@@ -10,6 +10,12 @@ on:
     types: [checks_requested]
   push:
     branches: [main]
+  # Rebuilds and re-saves main's caches twice a week. A cold build takes about
+  # 45 minutes, past dx git land's wait; a warm one takes minutes. An Actions
+  # cache unread for 7 days is evicted, and a new stable toolchain misses every
+  # key, so this pays the cold build off the PR path (qualithm/pm#2302).
+  schedule:
+    - cron: "0 4 * * 1,4"
   workflow_dispatch: {}
 
 concurrency:
@@ -30,12 +36,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      code: ${{ steps.f.outputs.code == 'true' || steps.f.outputs.ci == 'true' }}
+      code:
+        ${{ github.event_name == 'schedule' || steps.f.outputs.code == 'true' || steps.f.outputs.ci
+        == 'true' }}
       is-main: ${{ steps.tier.outputs.is-main }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: f
+        if: github.event_name != 'schedule'
         with:
           # A file must match every pattern. Under the default, any one match
           # is enough, so '**' alone marks every file as code and no exclusion
@@ -89,7 +98,9 @@ jobs:
           # which no other branch can read and which dies with the PR — so saving one
           # only churns the repo's 10GB LRU budget and evicts the main-scoped cache
           # every PR actually restores from.
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if:
+            ${{ (github.event_name == 'push' || github.event_name == 'schedule') && github.ref ==
+            'refs/heads/main' }}
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -117,7 +128,9 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: "coverage"
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if:
+            ${{ (github.event_name == 'push' || github.event_name == 'schedule') && github.ref ==
+            'refs/heads/main' }}
       - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: cargo-llvm-cov
@@ -202,7 +215,9 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: "doc"
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if:
+            ${{ (github.event_name == 'push' || github.event_name == 'schedule') && github.ref ==
+            'refs/heads/main' }}
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: "-Dwarnings"
@@ -228,8 +243,10 @@ jobs:
         with:
           shared-key: "bench"
           # This job is PR-only, so this is always false: restore-only. The bench key
-          # is seeded by the Benchmark Baseline job on push to main.
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # is seeded by the Benchmark Baseline job on push to main and on the schedule.
+          save-if:
+            ${{ (github.event_name == 'push' || github.event_name == 'schedule') && github.ref ==
+            'refs/heads/main' }}
       - name: Restore baseline from main
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
@@ -253,8 +270,8 @@ jobs:
     name: Benchmark Baseline
     needs: changes
     if:
-      needs.changes.outputs.code == 'true' && github.event_name == 'push' && github.ref ==
-      'refs/heads/main'
+      needs.changes.outputs.code == 'true' && (github.event_name == 'push' || github.event_name ==
+      'schedule') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
