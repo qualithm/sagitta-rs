@@ -23,11 +23,11 @@ file covers what they can't.
 ## Runtime
 
 - Async runs on `tokio`.
-- Log with `tracing` macros and structured fields (`info!(count = n, "processed items")`); use
+- Log with `tracing` macros and structured fields (`info!(item_count = n, "items_processed")`); use
   `#[instrument]` with `skip(...)` for sensitive or large arguments. Never `println!` in production
   code.
-- Config structs are `{Component}Config` with `///` on each field, units in names or comments
-  (`timeout_ms`), and a `Default` impl with production values.
+- Config structs are `{Component}Config` with `///` on each field, units in names (`timeout_ms`),
+  and a `Default` impl with production values.
 
 ## When code changes
 
