@@ -63,8 +63,8 @@ jobs:
               - '!.vscode/**'
               - '!docker/**'
               - '!justfile'
-              - '!scripts/**'
               - '!LICENSE'
+            # scripts/ stays code: a repo's tests may run the scripts in it.
             # The one file under .github/ that changes what these jobs run.
             ci:
               - '.github/workflows/ci.yaml'
