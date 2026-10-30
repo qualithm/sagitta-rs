@@ -46,4 +46,4 @@ declared key is missing from the local `.env`. `*-example` template repos carry 
 ## Generated files
 
 `.github/workflows/ci.yaml` is generated from `dx/ci-templates/`; change the template and run
-`dx ci sync` from dx, never edit it here. `CI Required` is the single required status check.
+`dx ci sync` from dx, never edit it here. `CI Required` and `PR Title` are required.
