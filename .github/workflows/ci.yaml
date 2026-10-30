@@ -23,6 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
   pull-requests: read
 
@@ -39,6 +40,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
+      reuse: ${{ steps.reuse.outputs.reuse == 'true' }}
       code:
         ${{ github.event_name == 'schedule' || steps.f.outputs.code == 'true' || steps.f.outputs.ci
         == 'true' }}
@@ -75,6 +77,28 @@ jobs:
           else
             echo "is-main=false" >> "$GITHUB_OUTPUT"
           fi
+      # A promotion PR usually holds a tree an earlier run already tested:
+      # a merge_group or push run tests exactly the commit it names. When one
+      # passed on this tree, the build, lint, format, typecheck and unit-test
+      # jobs skip. Any failed lookup means no reuse.
+      - id: reuse
+        if: github.event_name == 'pull_request' && github.base_ref != 'development'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          tree=$(gh api "repos/$REPO/git/commits/$SHA" --jq .tree.sha) || exit 0
+          shas=$(gh api "repos/$REPO/actions/workflows/ci.yaml/runs?status=success&per_page=30" \
+            --jq '.workflow_runs[] | select(.event == "merge_group" or .event == "push") | .head_sha' || true)
+          for sha in $shas; do
+            if [[ "$(gh api "repos/$REPO/git/commits/$sha" --jq .tree.sha || true)" == "$tree" ]]; then
+              echo "reuse=true" >> "$GITHUB_OUTPUT"
+              echo "reusing the passing run on $sha, which tested tree $tree"
+              exit 0
+            fi
+          done
+          echo "reuse=false" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build & Test
@@ -82,7 +106,7 @@ jobs:
     # Also runs on push to main. Actions caches are readable only from the branch
     # that wrote them plus the default branch, so a job that never runs on main
     # never seeds a cache any other branch can restore.
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.reuse != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -115,7 +139,7 @@ jobs:
   coverage:
     name: Coverage
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.reuse != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
