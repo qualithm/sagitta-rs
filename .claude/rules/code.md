@@ -40,8 +40,8 @@ and drop dependencies nothing uses.
 Adding or renaming an env var is a two-file change in one commit: declare it in `env-example` and
 classify it in `env-manifest.json` (a per-environment static, a `generate` recipe, or an `obtain`
 pointer to where the value comes from). Run `dx env local` before committing; it fails when a
-declared key is missing from the local `.env`. `*-example` template repos carry an empty
-`env-example` and no manifest.
+required key is missing or empty in `.env`, the one local env file. `*-example` template repos carry
+an empty `env-example` and no manifest.
 
 ## Generated files
 
