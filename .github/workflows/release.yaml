@@ -90,8 +90,21 @@ jobs:
       - name: Make binaries executable
         run: chmod +x binaries/linux/*/${{ env.BINARY_NAME }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      # Every architecture builds natively: a stage not pinned to
+      # $BUILDPLATFORM is built for each target, so a RUN there would need
+      # QEMU emulation (qualithm/pm#3074).
+      - name: Check the Dockerfile builds without emulation
+        env:
+          DOCKERFILE: docker/Dockerfile.release
+        run: |
+          awk '
+            toupper($1) == "FROM" { native = ($0 ~ /--platform=\$BUILDPLATFORM/) }
+            toupper($1) == "RUN" && !native {
+              printf "::error file=%s,line=%d::RUN in a stage built for the target platform; pin the stage to --platform=$BUILDPLATFORM or copy a prebuilt artifact instead\n", FILENAME, NR
+              bad = 1
+            }
+            END { exit bad }
+          ' "$DOCKERFILE"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
