@@ -4,7 +4,7 @@
 name: Security Audit
 
 # Advisory scans run daily; every job runs on Mondays and on a push that
-# changes a dependency (qualithm/pm#3067).
+# changes a dependency.
 on:
   schedule:
     - cron: "0 6 * * 0,2-6" # Daily at 06:00 UTC, except Monday
@@ -149,7 +149,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       # cargo-shear parses manifests and sources on stable, so nothing compiles
-      # and no cache is saved (qualithm/pm#3067). Silence a false positive with
+      # and no cache is saved. Silence a false positive with
       # [package.metadata.cargo-shear] ignored = ["crate"].
       - name: Install cargo-shear
         uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
