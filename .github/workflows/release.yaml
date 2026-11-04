@@ -94,7 +94,7 @@ jobs:
 
       # Every architecture builds natively: a stage not pinned to
       # $BUILDPLATFORM is built for each target, so a RUN there would need
-      # QEMU emulation (qualithm/pm#3074).
+      # QEMU emulation.
       - name: Check the Dockerfile builds without emulation
         env:
           DOCKERFILE: docker/Dockerfile.release

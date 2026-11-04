@@ -107,8 +107,8 @@ jobs:
       # it runs in full so its jobs save the caches PRs restore. A reused push
       # still uploads coverage, from the report a passing run recorded for the
       # tree; with none, it runs in full. When a passing run tested this tree,
-      # the build, lint, format, typecheck and unit-test jobs skip
-      # (qualithm/pm#2856). Any failed lookup means no reuse.
+      # the build, lint, format, typecheck and unit-test jobs skip.
+      # Any failed lookup means no reuse.
       - id: reuse
         if:
           github.event_name == 'merge_group' || github.event_name == 'push' || (github.event_name ==
