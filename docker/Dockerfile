@@ -3,7 +3,7 @@
 # Use Dockerfile.release for production with pre-built binaries
 
 # Stage 1: Plan dependencies
-FROM rust:1.99.1-alpine3.24@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87 AS planner
+FROM rust:1.99.1-alpine3.24@sha256:7e9e2d068a107a2adafd19930011178d14a78326053cd4c3a9f7ad3fd049557d AS planner
 RUN cargo install cargo-chef --locked
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -11,7 +11,7 @@ COPY crates ./crates
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2: Cache dependencies
-FROM rust:1.99.1-alpine3.24@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87 AS cacher
+FROM rust:1.99.1-alpine3.24@sha256:7e9e2d068a107a2adafd19930011178d14a78326053cd4c3a9f7ad3fd049557d AS cacher
 RUN apk add --no-cache musl-dev
 RUN cargo install cargo-chef --locked
 WORKDIR /build
@@ -20,7 +20,7 @@ COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Stage 3: Build application
-FROM rust:1.99.1-alpine3.24@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87 AS builder
+FROM rust:1.99.1-alpine3.24@sha256:7e9e2d068a107a2adafd19930011178d14a78326053cd4c3a9f7ad3fd049557d AS builder
 RUN apk add --no-cache musl-dev
 WORKDIR /build
 # Copy cached dependencies
