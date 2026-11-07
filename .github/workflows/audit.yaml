@@ -232,7 +232,12 @@ jobs:
           status=0
           for target in $(cargo "+$FUZZ_TOOLCHAIN" fuzz list); do
             echo "::group::${target}"
-            if ! cargo "+$FUZZ_TOOLCHAIN" fuzz run "$target" -- -max_total_time="$FUZZ_SECONDS" 2>&1 | tee fuzz.log; then
+            # libFuzzer writes new inputs into the first directory, so the corpus leads and
+            # the committed seeds only feed it.
+            dirs=("fuzz/corpus/${target}")
+            mkdir -p "${dirs[0]}"
+            [ -d "fuzz/seeds/${target}" ] && dirs+=("fuzz/seeds/${target}")
+            if ! cargo "+$FUZZ_TOOLCHAIN" fuzz run "$target" "${dirs[@]}" -- -max_total_time="$FUZZ_SECONDS" 2>&1 | tee fuzz.log; then
               status=1
               {
                 echo "### ${target}"
