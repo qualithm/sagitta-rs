@@ -1,0 +1,28 @@
+[package]
+name = "sagitta-rs-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sagitta = { path = "../crates/sagitta" }
+arrow-flight = "59"
+bytes = "1"
+http-body-util = "0.1"
+tokio = { version = "1", features = ["rt"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+
+# Not a member of the repo workspace.
+[workspace]
+
+[[bin]]
+name = "do_put_ingest"
+path = "fuzz_targets/do_put_ingest.rs"
+test = false
+doc = false
+bench = false
