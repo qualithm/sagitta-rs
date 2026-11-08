@@ -641,7 +641,7 @@ impl SagittaService {
     // store's opaque response metadata to the client.
     let response_metadata = self
       .store
-      .ingest(&path, schema.clone(), batches, request_metadata)
+      .ingest_with_context(ctx, &path, schema.clone(), batches, request_metadata)
       .await
       .map_err(Status::from)?;
 
@@ -3012,6 +3012,242 @@ mod tests {
 
     let path = DataPath::from(vec!["ingest", "echo"]);
     assert!(store.contains(&path).await.unwrap());
+  }
+
+  /// A store that records the caller each ingest runs for and refuses one
+  /// principal, the way a backend checking per-table permissions would.
+  struct CallerStore {
+    inner: crate::MemoryStore,
+    refused: &'static str,
+    seen: std::sync::Mutex<Vec<InterceptContext>>,
+  }
+
+  impl CallerStore {
+    fn refusing(refused: &'static str) -> Self {
+      Self {
+        inner: crate::MemoryStore::new(),
+        refused,
+        seen: std::sync::Mutex::new(Vec::new()),
+      }
+    }
+
+    fn seen(&self) -> Vec<InterceptContext> {
+      self.seen.lock().unwrap().clone()
+    }
+  }
+
+  #[async_trait::async_trait]
+  impl crate::Store for CallerStore {
+    async fn list(&self, schema_filter: Option<&str>) -> crate::Result<Vec<crate::Dataset>> {
+      self.inner.list(schema_filter).await
+    }
+    async fn get(&self, path: &DataPath) -> crate::Result<crate::Dataset> {
+      self.inner.get(path).await
+    }
+    async fn get_schema(&self, path: &DataPath) -> crate::Result<arrow_schema::SchemaRef> {
+      self.inner.get_schema(path).await
+    }
+    async fn get_batches(
+      &self,
+      path: &DataPath,
+    ) -> crate::Result<datafusion::execution::SendableRecordBatchStream> {
+      self.inner.get_batches(path).await
+    }
+    async fn put(
+      &self,
+      path: DataPath,
+      schema: arrow_schema::SchemaRef,
+      batches: Vec<arrow_array::RecordBatch>,
+    ) -> crate::Result<()> {
+      self.inner.put(path, schema, batches).await
+    }
+    async fn append_batches(
+      &self,
+      path: &DataPath,
+      batches: Vec<arrow_array::RecordBatch>,
+    ) -> crate::Result<()> {
+      self.inner.append_batches(path, batches).await
+    }
+    async fn ingest_with_context(
+      &self,
+      ctx: &InterceptContext,
+      path: &DataPath,
+      schema: arrow_schema::SchemaRef,
+      batches: Vec<arrow_array::RecordBatch>,
+      request_metadata: bytes::Bytes,
+    ) -> crate::Result<bytes::Bytes> {
+      self.seen.lock().unwrap().push(ctx.clone());
+      let principal = ctx.principal.as_deref().unwrap_or_default();
+      if principal == self.refused {
+        return Err(crate::Error::PermissionDenied(format!(
+          "`{principal}` lacks `write:{}`",
+          path.display()
+        )));
+      }
+      self
+        .inner
+        .ingest(path, schema, batches, request_metadata)
+        .await
+    }
+    async fn truncate(&self, path: &DataPath) -> crate::Result<()> {
+      self.inner.truncate(path).await
+    }
+    async fn update_schema(
+      &self,
+      path: &DataPath,
+      schema: arrow_schema::SchemaRef,
+    ) -> crate::Result<()> {
+      self.inner.update_schema(path, schema).await
+    }
+    async fn contains(&self, path: &DataPath) -> crate::Result<bool> {
+      self.inner.contains(path).await
+    }
+    async fn remove(&self, path: &DataPath) -> crate::Result<()> {
+      self.inner.remove(path).await
+    }
+    async fn copy(&self, src: &DataPath, dst: DataPath) -> crate::Result<()> {
+      self.inner.copy(src, dst).await
+    }
+    async fn rename(&self, src: &DataPath, dst: DataPath) -> crate::Result<()> {
+      self.inner.rename(src, dst).await
+    }
+    async fn create_schema(&self, name: &str) -> crate::Result<()> {
+      self.inner.create_schema(name).await
+    }
+    async fn schema_exists(&self, name: &str) -> crate::Result<bool> {
+      self.inner.schema_exists(name).await
+    }
+    async fn drop_schema(&self, name: &str) -> crate::Result<bool> {
+      self.inner.drop_schema(name).await
+    }
+    async fn list_schemas(&self) -> crate::Result<Vec<String>> {
+      self.inner.list_schemas().await
+    }
+  }
+
+  /// Send one single-row batch to `path` over a real Flight `DoPut` as the
+  /// caller holding `token`, returning the gRPC status code on failure.
+  async fn flight_put(
+    channel: tonic::transport::Channel,
+    token: &str,
+    path: &[&str],
+  ) -> Result<(), Status> {
+    use arrow_array::builder::Int64Builder;
+    use arrow_flight::FlightClient;
+    use arrow_flight::encode::FlightDataEncoderBuilder;
+    use arrow_flight::error::FlightError;
+    use arrow_schema::{DataType, Field, Schema};
+    use futures::TryStreamExt;
+
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+    let mut builder = Int64Builder::new();
+    builder.append_value(1);
+    let batch =
+      arrow_array::RecordBatch::try_new(schema.clone(), vec![Arc::new(builder.finish())]).unwrap();
+    let descriptor = FlightDescriptor::new_path(path.iter().map(|s| s.to_string()).collect());
+    let flight_data = FlightDataEncoderBuilder::new()
+      .with_schema(schema)
+      .with_flight_descriptor(Some(descriptor))
+      .build(futures::stream::once(async move { Ok(batch) }));
+
+    let mut client = FlightClient::new(channel);
+    client
+      .add_header("authorization", &format!("Bearer {token}"))
+      .unwrap();
+    let to_status = |e: FlightError| match e {
+      FlightError::Tonic(status) => *status,
+      other => Status::internal(other.to_string()),
+    };
+    let results: Vec<PutResult> = client
+      .do_put(flight_data)
+      .await
+      .map_err(to_status)?
+      .try_collect()
+      .await
+      .map_err(to_status)?;
+    assert_eq!(results.len(), 1);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn do_put_passes_the_authenticated_caller_to_ingest() {
+    use arrow_flight::flight_service_server::FlightServiceServer;
+    use tonic::transport::server::TcpIncoming;
+    use tonic::transport::{Channel, Server};
+
+    use crate::Store;
+
+    let store = Arc::new(CallerStore::refusing("intruder"));
+    let users = Arc::new(InMemoryUserStore::new());
+    let token = |name: &str, access: AccessLevel| {
+      users
+        .create_token(&User::new(name, access))
+        .as_str()
+        .to_string()
+    };
+    let writer = token("writer", AccessLevel::FullAccess);
+    let intruder = token("intruder", AccessLevel::FullAccess);
+    let reader = token("reader", AccessLevel::ReadOnly);
+    let service = SagittaService::with_user_store(store.clone(), Arc::new(users.clone())).await;
+
+    let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = incoming.local_addr().unwrap();
+    let server = tokio::spawn(
+      Server::builder()
+        .add_service(FlightServiceServer::new(service))
+        .serve_with_incoming(incoming),
+    );
+    let channel = Channel::from_shared(format!("http://{addr}"))
+      .unwrap()
+      .connect()
+      .await
+      .unwrap();
+
+    // The authenticated principal reaches the store.
+    flight_put(channel.clone(), &writer, &["ingest", "first"])
+      .await
+      .unwrap();
+    let expected = |name: &str| InterceptContext {
+      principal: Some(name.to_string()),
+      read_only: false,
+    };
+    assert_eq!(store.seen(), vec![expected("writer")]);
+
+    // A store refusal surfaces as PermissionDenied with the store's message.
+    let refused = flight_put(channel.clone(), &intruder, &["ingest", "first"])
+      .await
+      .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    assert_eq!(refused.message(), "`intruder` lacks `write:ingest/first`");
+
+    // A read-only caller is refused before ingest runs.
+    let read_only = flight_put(channel.clone(), &reader, &["ingest", "first"])
+      .await
+      .unwrap_err();
+    assert_eq!(read_only.code(), tonic::Code::PermissionDenied);
+    assert_eq!(read_only.message(), "write access required");
+
+    // An unauthenticated caller is refused before ingest runs.
+    let anonymous = flight_put(channel.clone(), "not-a-token", &["ingest", "first"])
+      .await
+      .unwrap_err();
+    assert_eq!(anonymous.code(), tonic::Code::Unauthenticated);
+
+    assert_eq!(store.seen(), vec![expected("writer"), expected("intruder")]);
+
+    // The server keeps serving after a refusal.
+    flight_put(channel, &writer, &["ingest", "second"])
+      .await
+      .unwrap();
+    assert!(
+      store
+        .contains(&DataPath::from(vec!["ingest", "second"]))
+        .await
+        .unwrap()
+    );
+    assert_eq!(store.seen().len(), 3);
+
+    server.abort();
   }
 
   #[tokio::test]
