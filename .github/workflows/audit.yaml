@@ -189,6 +189,10 @@ jobs:
       FUZZ_TOOLCHAIN: nightly-2026-10-01
       # The prebuilt cargo-fuzz is a static musl binary and would default to its own target.
       FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+      # An AddressSanitizer build of a large dependency tree runs the runner out of memory, and
+      # safe Rust panics reach libFuzzer without one. Match the runner's cores, not the repo's.
+      FUZZ_SANITIZER: none
+      CARGO_BUILD_JOBS: 4
     steps:
       - name: Create app token for pm issue filing
         id: app-token
@@ -239,7 +243,7 @@ jobs:
             dirs=("fuzz/corpus/${target}")
             mkdir -p "${dirs[0]}"
             [ -d "fuzz/seeds/${target}" ] && dirs+=("fuzz/seeds/${target}")
-            if ! cargo "+$FUZZ_TOOLCHAIN" fuzz run --target "$FUZZ_TARGET_TRIPLE" "$target" "${dirs[@]}" -- -max_total_time="$FUZZ_SECONDS" 2>&1 | tee fuzz.log; then
+            if ! cargo "+$FUZZ_TOOLCHAIN" fuzz run --target "$FUZZ_TARGET_TRIPLE" --sanitizer "$FUZZ_SANITIZER" "$target" "${dirs[@]}" -- -max_total_time="$FUZZ_SECONDS" 2>&1 | tee fuzz.log; then
               status=1
               {
                 echo "### ${target}"
@@ -276,7 +280,7 @@ jobs:
           {
             echo "body<<FUZZ_REPORT_EOF"
             echo "A fuzz target failed. Download the crashers (${ARTIFACT_URL}) into fuzz/artifacts,"
-            echo "then reproduce with \`cargo +${FUZZ_TOOLCHAIN} fuzz run --target ${FUZZ_TARGET_TRIPLE} <target> fuzz/artifacts/<target>/<file>\`."
+            echo "then reproduce with \`cargo +${FUZZ_TOOLCHAIN} fuzz run --target ${FUZZ_TARGET_TRIPLE} --sanitizer ${FUZZ_SANITIZER} <target> fuzz/artifacts/<target>/<file>\`."
             echo
             cat fuzz-report.md
             echo "FUZZ_REPORT_EOF"
