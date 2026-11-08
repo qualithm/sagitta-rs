@@ -183,7 +183,8 @@ jobs:
     # hold every promotion behind the fuzz time. A repo without fuzz/ skips the run.
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 6 * * 1'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # The largest builds take most of an hour on two jobs, before the fuzz time.
+    timeout-minutes: 90
     env:
       FUZZ_SECONDS: 600
       FUZZ_TOOLCHAIN: nightly-2026-10-01
