@@ -7,6 +7,7 @@ mod catalog;
 mod config;
 mod error;
 mod extension;
+mod interception_cache;
 mod interceptor;
 mod memory;
 mod metadata;
