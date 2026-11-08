@@ -27,7 +27,7 @@ use arrow_flight::{
 use arrow_ipc::writer::IpcWriteOptions;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use tonic::transport::CertificateDer;
 use tonic::{Request, Response, Status, Streaming};
@@ -608,10 +608,12 @@ impl SagittaService {
 
     // Collect all batches manually so we can access schema after
     let mut batches = Vec::new();
-    while let Some(result) = decoder
-      .as_mut()
-      .try_next()
+    // arrow-ipc panics on some malformed messages instead of returning an error, so a panic
+    // while decoding is refused like any other malformed stream (qualithm/pm#3352).
+    while let Some(result) = std::panic::AssertUnwindSafe(decoder.as_mut().try_next())
+      .catch_unwind()
       .await
+      .map_err(|_| Status::invalid_argument("failed to decode flight data: malformed ipc message"))?
       .map_err(|e| Status::invalid_argument(format!("failed to decode flight data: {e}")))?
     {
       batches.push(result);
@@ -3141,6 +3143,49 @@ mod tests {
       .await;
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+  }
+
+  #[tokio::test]
+  async fn test_do_put_refuses_a_panicking_decode() {
+    use crate::MemoryStore;
+    use arrow_flight::encode::FlightDataEncoderBuilder;
+    use arrow_flight::error::FlightError;
+    use arrow_schema::{DataType, Field, Schema};
+    use futures::StreamExt;
+
+    let store = Arc::new(MemoryStore::new());
+    let service = SagittaService::new(store.clone()).await;
+
+    // The descriptor arrives, then decoding the rest panics, as arrow-ipc does on some
+    // malformed messages.
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+    let descriptor = FlightDescriptor::new_path(vec!["put".to_string(), "panic".to_string()]);
+    let batch_stream = futures::stream::empty::<Result<arrow_array::RecordBatch, FlightError>>();
+    let mut flight_data: Vec<FlightData> = FlightDataEncoderBuilder::new()
+      .with_schema(schema)
+      .with_flight_descriptor(Some(descriptor))
+      .build(batch_stream)
+      .map(|r| r.unwrap())
+      .collect()
+      .await;
+    let first = flight_data.remove(0);
+    let stream = futures::stream::once(async move { Ok(first) })
+      .chain(futures::stream::poll_fn(
+        |_| -> std::task::Poll<Option<Result<FlightData, Status>>> {
+          panic!("malformed ipc message")
+        },
+      ))
+      .boxed();
+
+    let result = service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await;
+
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err.message().contains("malformed ipc message"));
+    let path = DataPath::from(vec!["put", "panic"]);
+    assert!(!store.contains(&path).await.unwrap());
   }
 
   #[tokio::test]
