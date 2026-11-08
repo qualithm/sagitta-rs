@@ -219,6 +219,15 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
           df -h /
+      # The largest crates' instrumented builds outgrow the runner's memory; swap absorbs the peak.
+      - name: Add swap
+        if: steps.targets.outputs.present == 'true'
+        run: |
+          sudo fallocate -l 16G /fuzz-swapfile
+          sudo chmod 600 /fuzz-swapfile
+          sudo mkswap /fuzz-swapfile
+          sudo swapon /fuzz-swapfile
+          free -m
       # cargo-fuzz needs nightly for the sanitizer flags; the date keeps runs comparable.
       - name: Install the nightly toolchain
         if: steps.targets.outputs.present == 'true'
