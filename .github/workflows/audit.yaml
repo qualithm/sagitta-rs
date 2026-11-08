@@ -190,9 +190,9 @@ jobs:
       # The prebuilt cargo-fuzz is a static musl binary and would default to its own target.
       FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
       # An AddressSanitizer build of a large dependency tree runs the runner out of memory, and
-      # safe Rust panics reach libFuzzer without one. Match the runner's cores, not the repo's.
+      # safe Rust panics reach libFuzzer without one. Two build jobs keep the largest trees in memory.
       FUZZ_SANITIZER: none
-      CARGO_BUILD_JOBS: 4
+      CARGO_BUILD_JOBS: 2
     steps:
       - name: Create app token for pm issue filing
         id: app-token
