@@ -24,6 +24,8 @@ from different repos read and search together. This is how they look here.
   never `e` or `err`.
 - Library crates never print and install no subscriber.
 - Logs aren't redacted, so a credential in a log is a leak to fix, not to mask.
+- Never log or trace a request or response body, a query value, or a parser message that quotes one;
+  a cross-zone path writes metadata only.
 
 ## Settings
 
