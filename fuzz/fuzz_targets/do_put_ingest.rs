@@ -51,7 +51,15 @@ fn runtime() -> &'static tokio::runtime::Runtime {
   })
 }
 
+/// libfuzzer-sys aborts on every panic, even one sagitta catches and refuses; the default hook
+/// keeps caught panics benign while an uncaught one still ends the run.
+fn default_panic_hook() {
+  static HOOK: OnceLock<()> = OnceLock::new();
+  HOOK.get_or_init(|| drop(std::panic::take_hook()));
+}
+
 fuzz_target!(|data: &[u8]| {
+  default_panic_hook();
   runtime().block_on(async {
     let service =
       SagittaService::with_user_store(Arc::new(MemoryStore::new()), Arc::new(Writer)).await;
