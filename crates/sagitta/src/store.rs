@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::interceptor::InterceptContext;
 use crate::{DataPath, Error, Result};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -203,8 +204,9 @@ pub trait Store: Send + Sync {
   /// Ingest record batches into a dataset, carrying opaque request metadata and
   /// returning opaque response metadata.
   ///
-  /// This is the streaming-append entry point used by Flight `DoPut` with a
-  /// PATH descriptor: the first message's `app_metadata` is passed through as
+  /// This is the streaming-append entry point behind Flight `DoPut` with a
+  /// PATH descriptor (reached through [`Self::ingest_with_context`]): the
+  /// first message's `app_metadata` is passed through as
   /// `request_metadata`, and the returned bytes are sent back to the client as
   /// the `PutResult.app_metadata`. Both are opaque to the framework, so an
   /// application can layer its own protocol on top — for example a
@@ -231,6 +233,35 @@ pub trait Store: Send + Sync {
       self.put(path.clone(), schema, batches).await?;
     }
     Ok(Bytes::new())
+  }
+
+  /// Ingest record batches on behalf of the caller described by `ctx`.
+  ///
+  /// Flight `DoPut` with a PATH descriptor calls this method, not
+  /// [`Self::ingest`], so a backend can authorize each write against the
+  /// authenticated caller: `ctx.principal` is the caller's username. The
+  /// server refuses an unauthenticated or read-only caller before this method
+  /// runs, so `ctx.read_only` is always `false` here. Return
+  /// [`Error::PermissionDenied`] to refuse the write; the client receives it
+  /// as `PermissionDenied` with the error's message.
+  ///
+  /// The default implementation ignores `ctx` and calls [`Self::ingest`].
+  /// Backends that check per-table permissions override this method.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the caller may not write to `path` or the write
+  /// fails.
+  async fn ingest_with_context(
+    &self,
+    ctx: &InterceptContext,
+    path: &DataPath,
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+    request_metadata: Bytes,
+  ) -> Result<Bytes> {
+    let _ = ctx;
+    self.ingest(path, schema, batches, request_metadata).await
   }
 
   /// Truncate a dataset, removing all data but keeping the schema.
