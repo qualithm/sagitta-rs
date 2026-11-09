@@ -195,13 +195,6 @@ jobs:
       FUZZ_SANITIZER: none
       CARGO_BUILD_JOBS: 2
     steps:
-      - name: Create app token for pm issue filing
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.PROJECTS_GH_APP_CLIENT_ID }}
-          private-key: ${{ secrets.PROJECTS_GH_APP_PRIVATE_KEY }}
-          owner: qualithm
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Find the fuzz targets
@@ -307,6 +300,15 @@ jobs:
             cat fuzz-report.md
             echo "FUZZ_REPORT_EOF"
           } >> "$GITHUB_OUTPUT"
+      # Minted after the fuzz run: the build and targets can outlast the token's hour.
+      - name: Create app token for pm issue filing
+        id: app-token
+        if: steps.scan.outcome == 'success' || steps.scan.outcome == 'failure'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.PROJECTS_GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECTS_GH_APP_PRIVATE_KEY }}
+          owner: qualithm
       - name: Report failure
         if: steps.scan.outcome == 'failure'
         uses: ./.github/actions/report-scan-failure
