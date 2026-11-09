@@ -20,14 +20,15 @@ pub struct QueryInterception {
   pub batches: Vec<RecordBatch>,
 }
 
-/// Request context describing the caller that issued an intercepted statement.
+/// Request context describing the caller that issued a request.
 ///
-/// Passed to the `*_with_context` interceptor methods so an embedder can
-/// attribute a statement to the authenticated caller (for example, to record an
-/// audit principal). The struct is `#[non_exhaustive]`: construct it with
+/// Passed to the `*_with_context` interceptor methods and to
+/// [`Store::ingest_with_context`](crate::Store::ingest_with_context) so an
+/// embedder can attribute a statement or write to the authenticated caller (for
+/// example, to record an audit principal or check a per-table permission). The struct is `#[non_exhaustive]`: construct it with
 /// [`InterceptContext::default`] and set the fields you need, so new fields can
 /// be added without breaking embedders.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct InterceptContext {
   /// Authenticated principal (username) that issued the statement, if any.
@@ -61,6 +62,11 @@ pub trait StatementInterceptor: Send + Sync {
   ///
   /// Return `Ok(Some(interception))` to satisfy the query from the interceptor,
   /// or `Ok(None)` to let DataFusion execute it.
+  ///
+  /// The engine consults the interceptor at `GetFlightInfo` and holds the
+  /// result briefly for that caller's `DoGet`. It consults the interceptor
+  /// again at `DoGet` only when no held result matches the redeeming caller's
+  /// [`InterceptContext`], so a ticket never bypasses the interceptor's checks.
   ///
   /// # Errors
   ///

@@ -31,6 +31,7 @@ use tracing::{debug, info, warn};
 
 use crate::catalog::StoreCatalog;
 use crate::extension::SharedSessionExtension;
+use crate::interception_cache::{InterceptionCache, decode_handle};
 use crate::interceptor::{InterceptContext, QueryInterception, SharedInterceptor};
 use crate::provider::StoreTableProvider;
 
@@ -323,6 +324,7 @@ pub struct SqlEngine {
   transactions: RwLock<HashMap<Bytes, Transaction>>,
   next_handle_id: RwLock<u64>,
   interceptor: Option<SharedInterceptor>,
+  interceptions: InterceptionCache,
 }
 
 impl SqlEngine {
@@ -338,6 +340,7 @@ impl SqlEngine {
       transactions: RwLock::new(HashMap::new()),
       next_handle_id: RwLock::new(1),
       interceptor: None,
+      interceptions: InterceptionCache::default(),
     }
   }
 
@@ -465,16 +468,21 @@ impl SqlEngine {
     let query = &cmd.query;
     debug!(query = %query, "executing statement query");
 
-    // A registered interceptor may claim the query and supply its own result
-    // schema. The data is produced later, when the ticket is fetched.
+    // A registered interceptor may claim the query. It produces the whole
+    // result now, so hold it for this caller's DoGet rather than running the
+    // query again; a result too large to hold is produced again at DoGet.
     if let Some(interceptor) = &self.interceptor
       && let Some(interception) = interceptor.intercept_query_with_context(ctx, query).await?
     {
-      let handle = self.create_query_handle(query);
+      let schema = interception.schema.clone();
+      let handle = self
+        .interceptions
+        .insert(ctx, query, interception)
+        .unwrap_or_else(|| self.create_query_handle(query));
       info!(query = %query, "query schema resolved by interceptor");
       return Ok(QueryResult {
         handle,
-        schema: interception.schema,
+        schema,
         total_records: -1,
       });
     }
@@ -511,16 +519,16 @@ impl SqlEngine {
     &self,
     ticket: &TicketStatementQuery,
   ) -> SqlResult<(SchemaRef, Vec<Arc<RecordBatch>>)> {
-    let handle = &ticket.statement_handle;
-    let query = String::from_utf8(handle.to_vec())
+    let handle = std::str::from_utf8(&ticket.statement_handle)
       .map_err(|_| SqlError::InvalidCommand("invalid query handle".to_string()))?;
+    let query = decode_handle(handle).query;
 
     debug!(query = %query, "executing statement query data via DataFusion");
 
     // Execute the query using DataFusion
     let ctx = self.ctx.read().unwrap().clone();
     let df = ctx
-      .sql(&query)
+      .sql(query)
       .await
       .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
 
@@ -568,18 +576,25 @@ impl SqlEngine {
     ctx: &InterceptContext,
   ) -> SqlResult<(SchemaRef, QueryDataStream)> {
     let handle = &ticket.statement_handle;
-    let query = String::from_utf8(handle.to_vec())
+    let handle = std::str::from_utf8(handle)
       .map_err(|_| SqlError::InvalidCommand("invalid query handle".to_string()))?;
+    let decoded = decode_handle(handle);
+    let query = decoded.query;
 
     debug!(query = %query, "executing statement query data stream via DataFusion");
 
-    // If an interceptor claims the query, stream the batches it produced rather
-    // than executing through DataFusion.
-    if let Some(interceptor) = &self.interceptor
-      && let Some(interception) = interceptor
-        .intercept_query_with_context(ctx, &query)
-        .await?
-    {
+    // Stream the result the interceptor produced for this caller at
+    // GetFlightInfo. Without one (never held, expired, already streamed, or
+    // issued to another caller) the interceptor runs again for this caller, so
+    // its checks apply to whoever redeems the ticket.
+    let interception = match self.interceptions.take(&decoded, ctx) {
+      Some(held) => Some(held),
+      None => match &self.interceptor {
+        Some(interceptor) => interceptor.intercept_query_with_context(ctx, query).await?,
+        None => None,
+      },
+    };
+    if let Some(interception) = interception {
       let QueryInterception { schema, batches } = interception;
       let stream = MemoryStream::try_new(batches, schema.clone(), None)
         .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
@@ -590,7 +605,7 @@ impl SqlEngine {
     // Execute the query using DataFusion
     let ctx = self.ctx.read().unwrap().clone();
     let df = ctx
-      .sql(&query)
+      .sql(query)
       .await
       .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
 
@@ -3497,6 +3512,198 @@ mod tests {
     let batches: Vec<_> = stream.try_collect().await.unwrap();
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 2);
+  }
+
+  /// Interceptor that claims every query, counts each execution, and denies
+  /// the principal `mallory`.
+  #[derive(Default)]
+  struct CountingInterceptor {
+    executions: std::sync::Mutex<Vec<(Option<String>, String)>>,
+  }
+
+  impl CountingInterceptor {
+    fn executions_of(&self, sql: &str) -> usize {
+      let executions = self.executions.lock().unwrap();
+      executions.iter().filter(|(_, q)| q == sql).count()
+    }
+  }
+
+  #[async_trait::async_trait]
+  impl crate::interceptor::StatementInterceptor for CountingInterceptor {
+    async fn intercept_update(&self, _sql: &str) -> SqlResult<Option<i64>> {
+      Ok(None)
+    }
+
+    async fn intercept_query(&self, sql: &str) -> SqlResult<Option<QueryInterception>> {
+      self
+        .intercept_query_with_context(&InterceptContext::default(), sql)
+        .await
+    }
+
+    async fn intercept_query_with_context(
+      &self,
+      ctx: &InterceptContext,
+      sql: &str,
+    ) -> SqlResult<Option<QueryInterception>> {
+      if ctx.principal.as_deref() == Some("mallory") {
+        return Err(SqlError::InvalidCommand("permission denied".into()));
+      }
+      self
+        .executions
+        .lock()
+        .unwrap()
+        .push((ctx.principal.clone(), sql.to_string()));
+      let schema = MarkerInterceptor::intercepted_schema();
+      let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+      )
+      .unwrap();
+      Ok(Some(QueryInterception {
+        schema,
+        batches: vec![batch],
+      }))
+    }
+  }
+
+  fn as_user(name: &str) -> InterceptContext {
+    InterceptContext {
+      principal: Some(name.to_string()),
+      read_only: false,
+    }
+  }
+
+  /// Run GetFlightInfo then DoGet for `sql`, returning the streamed row count.
+  async fn info_then_get(
+    engine: &SqlEngine,
+    sql: &str,
+    info_ctx: &InterceptContext,
+    get_ctx: &InterceptContext,
+  ) -> SqlResult<usize> {
+    use futures::TryStreamExt;
+
+    let cmd = CommandStatementQuery {
+      query: sql.to_string(),
+      transaction_id: None,
+    };
+    let result = engine
+      .execute_statement_query_with_context(&cmd, info_ctx)
+      .await?;
+    let ticket = TicketStatementQuery {
+      statement_handle: result.handle,
+    };
+    let (_, stream) = engine
+      .get_statement_query_data_stream_with_context(&ticket, get_ctx)
+      .await?;
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+    Ok(batches.iter().map(|b| b.num_rows()).sum())
+  }
+
+  #[tokio::test]
+  async fn test_intercepted_query_executes_once() {
+    let mut engine = create_test_engine().await;
+    let interceptor = Arc::new(CountingInterceptor::default());
+    engine.set_interceptor(interceptor.clone());
+
+    let alice = as_user("alice");
+    for sql in [
+      "SELECT * FROM readings",
+      "LATEST readings",
+      "DOWNSAMPLE readings BUCKET 10 AGG last(value)",
+    ] {
+      let rows = info_then_get(&engine, sql, &alice, &alice).await.unwrap();
+      assert_eq!(rows, 3);
+      assert_eq!(interceptor.executions_of(sql), 1, "{sql}");
+    }
+    assert_eq!(engine.interceptions.len(), 0);
+  }
+
+  #[tokio::test]
+  async fn test_intercepted_ticket_runs_again_for_another_caller() {
+    let mut engine = create_test_engine().await;
+    let interceptor = Arc::new(CountingInterceptor::default());
+    engine.set_interceptor(interceptor.clone());
+    let sql = "SELECT * FROM readings";
+
+    // Another principal presenting alice's ticket is checked as itself.
+    let denied = info_then_get(&engine, sql, &as_user("alice"), &as_user("mallory")).await;
+    assert!(matches!(denied, Err(SqlError::InvalidCommand(ref m)) if m == "permission denied"));
+
+    // A permitted principal gets its own execution, not alice's result.
+    let rows = info_then_get(&engine, sql, &as_user("alice"), &as_user("bob"))
+      .await
+      .unwrap();
+    assert_eq!(rows, 3);
+    let executions = interceptor.executions.lock().unwrap().clone();
+    assert_eq!(
+      executions
+        .iter()
+        .map(|(p, _)| p.as_deref())
+        .collect::<Vec<_>>(),
+      vec![Some("alice"), Some("alice"), Some("bob")]
+    );
+  }
+
+  #[tokio::test]
+  async fn test_intercepted_query_denied_at_get_flight_info() {
+    let mut engine = create_test_engine().await;
+    engine.set_interceptor(Arc::new(CountingInterceptor::default()));
+    let mallory = as_user("mallory");
+
+    let result = info_then_get(&engine, "SELECT 1", &mallory, &mallory).await;
+    assert!(matches!(result, Err(SqlError::InvalidCommand(ref m)) if m == "permission denied"));
+    assert_eq!(engine.interceptions.len(), 0);
+  }
+
+  #[tokio::test]
+  async fn test_unheld_interception_runs_again_at_do_get() {
+    let mut engine = create_test_engine().await;
+    let interceptor = Arc::new(CountingInterceptor::default());
+    engine.set_interceptor(interceptor.clone());
+    // A cache that holds nothing: DoGet must produce the result itself.
+    engine.interceptions = InterceptionCache::new(std::time::Duration::from_secs(60), 0, 0);
+    let sql = "LATEST readings";
+
+    let alice = as_user("alice");
+    let rows = info_then_get(&engine, sql, &alice, &alice).await.unwrap();
+    assert_eq!(rows, 3);
+    assert_eq!(interceptor.executions_of(sql), 2);
+
+    // The DoGet execution is still checked against its caller.
+    let denied = info_then_get(&engine, sql, &alice, &as_user("mallory")).await;
+    assert!(matches!(denied, Err(SqlError::InvalidCommand(ref m)) if m == "permission denied"));
+  }
+
+  #[tokio::test]
+  async fn test_redeemed_ticket_runs_again() {
+    use futures::TryStreamExt;
+
+    let mut engine = create_test_engine().await;
+    let interceptor = Arc::new(CountingInterceptor::default());
+    engine.set_interceptor(interceptor.clone());
+    let sql = "SELECT * FROM readings";
+    let alice = as_user("alice");
+
+    let cmd = CommandStatementQuery {
+      query: sql.to_string(),
+      transaction_id: None,
+    };
+    let result = engine
+      .execute_statement_query_with_context(&cmd, &alice)
+      .await
+      .unwrap();
+    let ticket = TicketStatementQuery {
+      statement_handle: result.handle,
+    };
+    for _ in 0..2 {
+      let (_, stream) = engine
+        .get_statement_query_data_stream_with_context(&ticket, &alice)
+        .await
+        .unwrap();
+      let batches: Vec<_> = stream.try_collect().await.unwrap();
+      assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+    }
+    assert_eq!(interceptor.executions_of(sql), 2);
   }
 
   #[tokio::test]
