@@ -251,6 +251,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.reuse != 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      id-token: write
     timeout-minutes: 60
     steps:
       # No "Free disk space" step: see the build job — measured headroom is
@@ -318,7 +323,7 @@ jobs:
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           binary: ${{ runner.temp }}/codecov
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: lcov.info
           fail_ci_if_error: true
       - name: Wait before retrying the Codecov upload
@@ -331,7 +336,7 @@ jobs:
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           binary: ${{ runner.temp }}/codecov
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: lcov.info
           fail_ci_if_error: true
       # Non-blocking by design: Codecov reports coverage, it never gates it, so
@@ -357,6 +362,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.coverage-run != ''
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      id-token: write
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -390,7 +400,7 @@ jobs:
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           binary: ${{ runner.temp }}/codecov
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: lcov.info
           fail_ci_if_error: true
       - name: Wait before retrying the Codecov upload
@@ -403,7 +413,7 @@ jobs:
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           binary: ${{ runner.temp }}/codecov
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: lcov.info
           fail_ci_if_error: true
       # Non-blocking by design: Codecov reports coverage, it never gates it, so
