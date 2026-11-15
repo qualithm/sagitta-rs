@@ -16,6 +16,14 @@ on:
       - "Cargo.lock"
       - "deny.toml"
       - ".github/workflows/audit.yaml"
+  # A dependency change runs the advisory scan alone before it merges; it files no issue.
+  pull_request:
+    branches: [development, main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/audit.yaml"
   workflow_dispatch: {}
 
 # A newer push supersedes an older one; schedules queue apart from pushes.
@@ -70,6 +78,7 @@ jobs:
           for id in "${ids[@]}"; do args+=(--ignore "$id"); done
           cargo audit "${args[@]}"
       - name: Create app token for pm issue filing
+        if: github.event_name != 'pull_request'
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -77,14 +86,14 @@ jobs:
           private-key: ${{ secrets.PROJECTS_GH_APP_PRIVATE_KEY }}
           owner: qualithm
       - name: Report failure
-        if: steps.scan.outcome == 'failure'
+        if: github.event_name != 'pull_request' && (steps.scan.outcome == 'failure')
         uses: ./.github/actions/report-scan-failure
         with:
           mode: report
           title: "${{ github.event.repository.name }}: RustSec found an advisory"
           github-token: ${{ steps.app-token.outputs.token }}
       - name: Resolve stale failure issue
-        if: steps.scan.outcome == 'success'
+        if: github.event_name != 'pull_request' && (steps.scan.outcome == 'success')
         uses: ./.github/actions/report-scan-failure
         with:
           mode: resolve
@@ -97,7 +106,9 @@ jobs:
   deny:
     name: Dependency Audit (cargo-deny)
     # Weekly: what it checks changes only with the code or dependencies.
-    if: github.event_name != 'schedule' || github.event.schedule == '0 6 * * 1'
+    if:
+      github.event_name != 'pull_request' && (github.event_name != 'schedule' ||
+      github.event.schedule == '0 6 * * 1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -135,7 +146,9 @@ jobs:
   udeps:
     name: Unused Dependencies
     # Weekly: what it checks changes only with the code or dependencies.
-    if: github.event_name != 'schedule' || github.event.schedule == '0 6 * * 1'
+    if:
+      github.event_name != 'pull_request' && (github.event_name != 'schedule' ||
+      github.event.schedule == '0 6 * * 1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -181,7 +194,9 @@ jobs:
     name: Fuzz
     # Weekly or on dispatch, with the corpus carried from run to run; a push would
     # hold every promotion behind the fuzz time. A repo without fuzz/ skips the run.
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 6 * * 1'
+    if:
+      github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '0 6 * * 1')
     runs-on: ubuntu-24.04
     # The largest builds take most of an hour on two jobs, before the fuzz time.
     timeout-minutes: 90
@@ -330,6 +345,7 @@ jobs:
 
   gitleaks:
     name: Secret Scan
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -371,6 +387,7 @@ jobs:
         with:
           mode: report
           title: "${{ github.event.repository.name }}: gitleaks found a leaked secret"
+          severity: critical
           github-token: ${{ steps.app-token.outputs.token }}
       - name: Resolve stale failure issue
         if: steps.scan.outcome == 'success'
