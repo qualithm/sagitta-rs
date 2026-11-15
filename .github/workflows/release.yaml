@@ -162,6 +162,138 @@ jobs:
           # Distroless has no shell; invoke the binary directly.
           docker run --rm "${{ env.IMAGE }}:sha-${GITHUB_SHA::7}" --version
 
+  # Scans an image the release just pushed for fixable high and critical
+  # vulnerabilities and files a scan-failure issue on pm. It reports without
+  # blocking: the image is already pushed, and a finding never fails the run.
+  scan-image:
+    name: Scan image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: docker
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+
+      - name: Install Trivy
+        env:
+          # Pinned release plus the sha256 of its Linux-64bit tarball from the
+          # release's checksums file. Bump both values together.
+          TRIVY_VERSION: 0.76.1
+          TRIVY_SHA256: c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$RUNNER_TEMP/trivy.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "$TRIVY_SHA256  $RUNNER_TEMP/trivy.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP" trivy
+
+      # Trivy reads registry credentials from the Docker config by host, so its
+      # vulnerability DB still downloads anonymously.
+      - name: Login to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Every platform the release pushes, since a digest alone names only the
+      # runner's. Only findings with a fixed version count: an unfixable one has
+      # no action to take. The tables go to the log; the merged JSON feeds the
+      # issue. The step fails on a finding, and `scanned` tells that apart from a
+      # scan that could not run.
+      - name: Scan the image
+        id: scan
+        continue-on-error: true
+        env:
+          IMAGE_REF: ${{ env.IMAGE }}@${{ needs.docker.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/trivy" image --download-db-only --no-progress
+          for platform in linux/amd64 linux/arm64; do
+            "$RUNNER_TEMP/trivy" image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+              --skip-db-update --no-progress --platform "$platform" --format json \
+              --output "$RUNNER_TEMP/trivy-${platform#*/}.json" "$IMAGE_REF"
+            echo "::group::$platform"
+            "$RUNNER_TEMP/trivy" convert --format table "$RUNNER_TEMP/trivy-${platform#*/}.json"
+            echo "::endgroup::"
+          done
+          jq -s '[.[] | .Results[]?.Vulnerabilities[]?]
+            | unique_by(.VulnerabilityID + .PkgName + .InstalledVersion)
+            | sort_by(.Severity, .VulnerabilityID)' "$RUNNER_TEMP"/trivy-*.json \
+            > "$RUNNER_TEMP/findings.json"
+          echo "scanned=true" >> "$GITHUB_OUTPUT"
+          [[ "$(jq length "$RUNNER_TEMP/findings.json")" -eq 0 ]]
+
+      # The table is capped to keep the issue body under GitHub's size limit.
+      - name: Summarise findings
+        id: findings
+        if: steps.scan.outcome == 'failure'
+        env:
+          IMAGE_REF: ${{ env.IMAGE }}@${{ needs.docker.outputs.image-digest }}
+          SCANNED: ${{ steps.scan.outputs.scanned }}
+          MAX_ROWS: 150
+        run: |
+          set -euo pipefail
+          findings="$RUNNER_TEMP/findings.json"
+          if [[ "$SCANNED" != "true" ]]; then
+            echo "severity=high" >> "$GITHUB_OUTPUT"
+            printf 'body=%s\n' "Trivy could not scan \`$IMAGE_REF\`; see the run log." >> "$GITHUB_OUTPUT"
+            echo "::warning::Trivy could not scan $IMAGE_REF"
+            exit 0
+          fi
+          if jq -e 'any(.Severity == "CRITICAL")' "$findings" > /dev/null; then
+            echo "severity=critical" >> "$GITHUB_OUTPUT"
+          else
+            echo "severity=high" >> "$GITHUB_OUTPUT"
+          fi
+          total="$(jq length "$findings")"
+          {
+            echo "body<<EOF_BODY"
+            echo "Trivy found fixable high or critical vulnerabilities in \`$IMAGE_REF\`."
+            echo
+            echo "| ID | Severity | Package | Installed | Fixed |"
+            echo "| --- | --- | --- | --- | --- |"
+            jq -r --argjson max "$MAX_ROWS" '.[:$max][]
+              | "| \(.VulnerabilityID) | \(.Severity) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion) |"' \
+              "$findings"
+            if (( total > MAX_ROWS )); then
+              echo
+              echo "And $((total - MAX_ROWS)) more; see the run log."
+            fi
+            echo "EOF_BODY"
+          } >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy found $total fixable high or critical vulnerabilities in $IMAGE_REF"
+
+      - name: Create app token for pm issue filing
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.PROJECTS_GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECTS_GH_APP_PRIVATE_KEY }}
+          owner: qualithm
+
+      - name: Report findings
+        if: steps.scan.outcome == 'failure'
+        uses: ./.github/actions/report-scan-failure
+        with:
+          mode: report
+          title: "${{ github.event.repository.name }}: Trivy found a vulnerability in the image"
+          severity: ${{ steps.findings.outputs.severity }}
+          body: ${{ steps.findings.outputs.body }}
+          github-token: ${{ steps.app-token.outputs.token }}
+
+      - name: Resolve stale findings issue
+        if: steps.scan.outcome == 'success'
+        uses: ./.github/actions/report-scan-failure
+        with:
+          mode: resolve
+          title: "${{ github.event.repository.name }}: Trivy found a vulnerability in the image"
+          github-token: ${{ steps.app-token.outputs.token }}
+
   publish-crate:
     if: ${{ !endsWith(github.repository, '-example') }}
     name: Publish to crates.io
