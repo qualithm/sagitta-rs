@@ -4,7 +4,18 @@
 [advisories]
 version = 2
 db-path = "~/.cargo/advisory-db"
-ignore = []
+ignore = [
+    # chrono and chrono-tz are unmaintained, but arrow and datafusion depend on them, and no
+    # release of either has moved off them. Remove these ignores once neither is locked.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0543
+    "RUSTSEC-2026-0543",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0555
+    "RUSTSEC-2026-0555",
+    # humantime is unmaintained because it wraps chrono; object_store depends on it. Remove this
+    # ignore once humantime is no longer locked.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0542
+    "RUSTSEC-2026-0542",
+]
 
 [licenses]
 version = 2
