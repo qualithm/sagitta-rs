@@ -385,6 +385,7 @@ impl SagittaService {
         let combined = first_stream
           .map(|r| r.map_err(|e| FlightError::Tonic(Box::new(e))))
           .chain(rest_stream);
+        let combined = crate::ipc_guard::guard_decompressed_size(combined);
 
         // Decode flight data into schema and record batches
         let mut decoder = std::pin::pin!(FlightRecordBatchStream::new_from_flight_data(combined));
@@ -444,6 +445,7 @@ impl SagittaService {
         let combined = first_stream
           .map(|r| r.map_err(|e| FlightError::Tonic(Box::new(e))))
           .chain(rest_stream);
+        let combined = crate::ipc_guard::guard_decompressed_size(combined);
 
         let mut decoder = std::pin::pin!(FlightRecordBatchStream::new_from_flight_data(combined));
 
@@ -602,6 +604,7 @@ impl SagittaService {
     let combined = first_stream
       .map(|r| r.map_err(|e| FlightError::Tonic(Box::new(e))))
       .chain(rest_stream);
+    let combined = crate::ipc_guard::guard_decompressed_size(combined);
 
     // Decode flight data into schema and record batches
     let mut decoder = std::pin::pin!(FlightRecordBatchStream::new_from_flight_data(combined));
@@ -712,6 +715,7 @@ impl SagittaService {
       let combined = first_stream
         .map(|r| r.map_err(|e| FlightError::Tonic(Box::new(e))))
         .chain(rest_stream);
+      let combined = crate::ipc_guard::guard_decompressed_size(combined);
 
       let mut decoder = std::pin::pin!(FlightRecordBatchStream::new_from_flight_data(combined));
 
@@ -3422,6 +3426,107 @@ mod tests {
     assert!(err.message().contains("malformed ipc message"));
     let path = DataPath::from(vec!["put", "panic"]);
     assert!(!store.contains(&path).await.unwrap());
+  }
+
+  /// The gRPC-framed `FlightData` messages of a fuzz seed.
+  fn grpc_frames(mut body: &[u8]) -> Vec<FlightData> {
+    let mut messages = Vec::new();
+    while body.len() >= 5 {
+      let length = u32::from_be_bytes(body[1..5].try_into().unwrap()) as usize;
+      let Some(frame) = body.get(5..5 + length) else {
+        break;
+      };
+      messages.push(FlightData::decode(frame).unwrap());
+      body = &body[5 + length..];
+    }
+    messages
+  }
+
+  #[tokio::test]
+  async fn test_do_put_refuses_an_oversized_decompressed_length() {
+    use crate::MemoryStore;
+
+    let store = Arc::new(MemoryStore::new());
+    let service = SagittaService::new(store.clone()).await;
+    let seed = include_bytes!("../../../fuzz/seeds/do_put_ingest/compressed_length_overflow");
+    let stream = futures::stream::iter(grpc_frames(seed).into_iter().map(Ok)).boxed();
+
+    let err = service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await
+      .unwrap_err();
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err.message().contains("decompressed bytes"), "{err}");
+  }
+
+  #[tokio::test]
+  async fn test_prepared_statement_parameters_refuse_an_oversized_decompressed_length() {
+    use crate::MemoryStore;
+    use arrow_flight::sql::ProstMessageExt;
+
+    let service = SagittaService::new(Arc::new(MemoryStore::new())).await;
+    let seed = include_bytes!("../../../fuzz/seeds/do_put_ingest/compressed_length_overflow");
+    let mut messages = grpc_frames(seed);
+    let command = CommandPreparedStatementQuery {
+      prepared_statement_handle: "h".into(),
+    };
+    messages[0].flight_descriptor =
+      Some(FlightDescriptor::new_cmd(command.as_any().encode_to_vec()));
+    let stream = futures::stream::iter(messages.into_iter().map(Ok)).boxed();
+
+    let err = service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await
+      .unwrap_err();
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err.message().contains("decompressed bytes"), "{err}");
+  }
+
+  #[test]
+  fn grpc_frames_stops_at_a_truncated_frame() {
+    let seed = include_bytes!("../../../fuzz/seeds/do_put_ingest/compressed_length_overflow");
+    assert!(grpc_frames(&seed[..seed.len() - 1]).len() < grpc_frames(seed).len());
+  }
+
+  #[tokio::test]
+  async fn test_do_put_ingests_a_compressed_batch() {
+    use crate::MemoryStore;
+    use arrow_array::Int64Array;
+    use arrow_flight::encode::FlightDataEncoderBuilder;
+    use arrow_ipc::CompressionType;
+    use arrow_schema::{DataType, Field, Schema};
+
+    let store = Arc::new(MemoryStore::new());
+    let service = SagittaService::new(store.clone()).await;
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+    let batch = arrow_array::RecordBatch::try_new(
+      schema.clone(),
+      vec![Arc::new(Int64Array::from_iter_values(0..1024))],
+    )
+    .unwrap();
+    let descriptor = FlightDescriptor::new_path(vec!["put".to_string(), "lz4".to_string()]);
+    let options = IpcWriteOptions::default()
+      .try_with_compression(Some(CompressionType::LZ4_FRAME))
+      .unwrap();
+    let flight_data: Vec<FlightData> = FlightDataEncoderBuilder::new()
+      .with_options(options)
+      .with_schema(schema)
+      .with_flight_descriptor(Some(descriptor))
+      .build(futures::stream::iter([Ok(batch)]))
+      .try_collect()
+      .await
+      .unwrap();
+    let stream = futures::stream::iter(flight_data.into_iter().map(Ok)).boxed();
+
+    service
+      .do_put_inner(stream, &InterceptContext::default())
+      .await
+      .unwrap();
+
+    let path = DataPath::from(vec!["put", "lz4"]);
+    assert!(store.contains(&path).await.unwrap());
   }
 
   #[tokio::test]
