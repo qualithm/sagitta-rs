@@ -9,6 +9,7 @@ mod error;
 mod extension;
 mod interception_cache;
 mod interceptor;
+mod ipc_guard;
 mod memory;
 mod metadata;
 mod provider;
