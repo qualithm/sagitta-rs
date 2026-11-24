@@ -18,13 +18,19 @@ use arrow_ipc::writer::IpcWriteOptions;
 use arrow_schema::{ArrowError, Field, Schema, SchemaRef};
 use bytes::Bytes;
 use datafusion::common::TableReference;
+use datafusion::dataframe::DataFrame;
 use datafusion::execution::SendableRecordBatchStream;
+use datafusion::execution::SessionStateBuilder;
+use datafusion::execution::object_store::{
+  DefaultObjectStoreRegistry, ObjectStoreRegistry, ObjectStoreUrl,
+};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{
   CreateCatalogSchema, CreateView, DdlStatement, DmlStatement, DropCatalogSchema, DropTable,
   DropView, LogicalPlan, WriteOp,
 };
 use datafusion::physical_plan::memory::MemoryStream;
-use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion::prelude::{SQLOptions, SessionConfig, SessionContext};
 use futures::Stream;
 use prost::Message;
 use tracing::{debug, info, warn};
@@ -373,7 +379,7 @@ impl SqlEngine {
     let config = SessionConfig::new()
       .with_default_catalog_and_schema(catalog_name, default_schema)
       .with_information_schema(true);
-    let ctx = SessionContext::new_with_config(config);
+    let ctx = SessionContext::new_with_state(restricted_session_state(config));
 
     // Register our catalog
     let catalog = StoreCatalog::new(store.clone(), catalog_name, default_schema).await;
@@ -429,9 +435,20 @@ impl SqlEngine {
 
   /// Return a clone of the underlying [`SessionContext`].
   ///
-  /// Used by callers that need direct DataFusion access (e.g. `DoExchange` query mode).
+  /// Clones share the engine's state. Run client SQL on it only through
+  /// [`read_only_sql_options`].
   pub fn session_ctx(&self) -> SessionContext {
     self.ctx.read().unwrap().clone()
+  }
+
+  /// Plan a client's query on the engine context with [`read_only_sql_options`],
+  /// so it can only read: DDL, DML and session statements are refused.
+  async fn plan_client_query(&self, query: &str) -> SqlResult<DataFrame> {
+    let ctx = self.ctx.read().unwrap().clone();
+    ctx
+      .sql_with_options(query, read_only_sql_options())
+      .await
+      .map_err(|e| SqlError::QueryExecution(e.to_string()))
   }
 
   /// Parse a CMD descriptor into a Flight SQL command.
@@ -488,11 +505,7 @@ impl SqlEngine {
     }
 
     // Use DataFusion to validate the query and get the logical plan
-    let ctx = self.ctx.read().unwrap().clone();
-    let df = ctx
-      .sql(query)
-      .await
-      .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
+    let df = self.plan_client_query(query).await?;
 
     let schema = df.schema().inner().clone();
 
@@ -526,11 +539,7 @@ impl SqlEngine {
     debug!(query = %query, "executing statement query data via DataFusion");
 
     // Execute the query using DataFusion
-    let ctx = self.ctx.read().unwrap().clone();
-    let df = ctx
-      .sql(query)
-      .await
-      .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
+    let df = self.plan_client_query(query).await?;
 
     let schema = df.schema().inner().clone();
     let batches = df
@@ -603,11 +612,7 @@ impl SqlEngine {
     }
 
     // Execute the query using DataFusion
-    let ctx = self.ctx.read().unwrap().clone();
-    let df = ctx
-      .sql(query)
-      .await
-      .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
+    let df = self.plan_client_query(query).await?;
 
     let schema = df.schema().inner().clone();
 
@@ -893,7 +898,7 @@ impl SqlEngine {
                   let surviving_query =
                     format!("SELECT * FROM {qualified} WHERE NOT ({condition})");
                   let sdf = ctx
-                    .sql(&surviving_query)
+                    .sql_with_options(&surviving_query, read_only_sql_options())
                     .await
                     .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
                   sdf
@@ -972,7 +977,7 @@ impl SqlEngine {
 
             let surviving_query = format!("SELECT * FROM {qualified} WHERE NOT ({condition})");
             let sdf = ctx
-              .sql(&surviving_query)
+              .sql_with_options(&surviving_query, read_only_sql_options())
               .await
               .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
             let surviving_batches = sdf
@@ -1839,7 +1844,7 @@ impl SqlEngine {
         select_cols.join(", ")
       );
       let df = ctx
-        .sql(&unchanged_query)
+        .sql_with_options(&unchanged_query, read_only_sql_options())
         .await
         .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
       all_batches.extend(
@@ -1867,7 +1872,7 @@ impl SqlEngine {
         select_cols.join(", ")
       );
       let df = ctx
-        .sql(&updated_query)
+        .sql_with_options(&updated_query, read_only_sql_options())
         .await
         .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
       let updated_batches = df
@@ -1899,7 +1904,7 @@ impl SqlEngine {
         select_cols.join(", ")
       );
       let df = ctx
-        .sql(&inserted_query)
+        .sql_with_options(&inserted_query, read_only_sql_options())
         .await
         .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
       let inserted_batches = df
@@ -2024,7 +2029,7 @@ impl SqlEngine {
           .join(", ")
       );
       let df = ctx
-        .sql(&existing_query)
+        .sql_with_options(&existing_query, read_only_sql_options())
         .await
         .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
       all_batches.extend(
@@ -2050,7 +2055,7 @@ impl SqlEngine {
         insert_cols.join(", ")
       );
       let df = ctx
-        .sql(&new_query)
+        .sql_with_options(&new_query, read_only_sql_options())
         .await
         .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
       let new_batches = df
@@ -2080,7 +2085,7 @@ impl SqlEngine {
         existing_cols.join(", ")
       );
       let df = ctx
-        .sql(&existing_query)
+        .sql_with_options(&existing_query, read_only_sql_options())
         .await
         .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
       all_batches.extend(
@@ -2106,7 +2111,7 @@ impl SqlEngine {
         update_cols.join(", ")
       );
       let df = ctx
-        .sql(&updated_query)
+        .sql_with_options(&updated_query, read_only_sql_options())
         .await
         .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
       let updated_batches = df
@@ -2136,7 +2141,7 @@ impl SqlEngine {
         insert_cols.join(", ")
       );
       let df = ctx
-        .sql(&new_query)
+        .sql_with_options(&new_query, read_only_sql_options())
         .await
         .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
       let new_batches = df
@@ -2432,11 +2437,7 @@ impl SqlEngine {
     // Validate the query and determine schema using DataFusion
     let (dataset_schema, parameter_schema) = if is_query {
       // For SELECT queries, use DataFusion to get the result schema
-      let ctx = self.ctx.read().unwrap().clone();
-      let df = ctx
-        .sql(query)
-        .await
-        .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
+      let df = self.plan_client_query(query).await?;
 
       let schema = df.schema().inner().clone();
       let params = self.extract_parameter_schema(query);
@@ -2583,11 +2584,7 @@ impl SqlEngine {
     };
 
     // Use DataFusion to get the schema
-    let ctx = self.ctx.read().unwrap().clone();
-    let df = ctx
-      .sql(&query)
-      .await
-      .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
+    let df = self.plan_client_query(&query).await?;
 
     let schema = df.schema().inner().clone();
 
@@ -2621,11 +2618,7 @@ impl SqlEngine {
     };
 
     // Execute using DataFusion
-    let ctx = self.ctx.read().unwrap().clone();
-    let df = ctx
-      .sql(&query)
-      .await
-      .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
+    let df = self.plan_client_query(&query).await?;
 
     let schema = df.schema().inner().clone();
     let batches = df
@@ -2664,11 +2657,7 @@ impl SqlEngine {
     };
 
     // Execute using DataFusion
-    let ctx = self.ctx.read().unwrap().clone();
-    let df = ctx
-      .sql(&query)
-      .await
-      .map_err(|e| SqlError::QueryExecution(e.to_string()))?;
+    let df = self.plan_client_query(&query).await?;
 
     let schema = df.schema().inner().clone();
 
@@ -3167,6 +3156,35 @@ pub fn create_statement_ticket(handle: Bytes) -> Bytes {
   ticket.encode_to_vec().into()
 }
 
+/// [`SQLOptions`] for SQL from a client: DDL, DML and session statements such as
+/// `SET` are refused, so a query can only read. Embedders that plan client SQL on
+/// their own [`SessionContext`] should pass these to `sql_with_options`.
+pub fn read_only_sql_options() -> SQLOptions {
+  SQLOptions::new()
+    .with_allow_ddl(false)
+    .with_allow_dml(false)
+    .with_allow_statements(false)
+}
+
+/// A [`SessionState`](datafusion::execution::SessionState) with DataFusion's
+/// built-in functions and planners but no file-format table factories and no
+/// `file://` object store, so SQL cannot read or write the server's files. An
+/// embedder that needs a file store registers one on the context.
+pub fn restricted_session_state(config: SessionConfig) -> datafusion::execution::SessionState {
+  let registry = DefaultObjectStoreRegistry::new();
+  let _ = registry.deregister_store(ObjectStoreUrl::local_filesystem().as_ref());
+  let runtime = RuntimeEnvBuilder::new()
+    .with_object_store_registry(Arc::new(registry))
+    .build_arc()
+    .expect("runtime env builds");
+  SessionStateBuilder::new()
+    .with_config(config)
+    .with_runtime_env(runtime)
+    .with_default_features()
+    .with_table_factories(HashMap::new())
+    .build()
+}
+
 /// Create a TicketStatementQuery for a prepared statement handle.
 pub fn create_prepared_statement_ticket(handle: Bytes) -> Bytes {
   // Use the same ticket format as regular statement queries
@@ -3264,6 +3282,182 @@ mod tests {
   async fn create_fixture_engine() -> SqlEngine {
     let store: Arc<dyn Store> = Arc::new(MemoryStore::with_test_fixtures());
     SqlEngine::new(store, DEFAULT_CATALOG, DEFAULT_SCHEMA).await
+  }
+
+  /// Statements a client must not run through the query path, each with the
+  /// files it would read or write.
+  fn refused_statements(dir: &std::path::Path, secret: &std::path::Path) -> Vec<String> {
+    vec![
+      format!(
+        "CREATE EXTERNAL TABLE leak (l VARCHAR) STORED AS CSV LOCATION '{}'",
+        secret.display()
+      ),
+      format!(
+        "COPY (SELECT 1 AS a) TO '{}' STORED AS CSV",
+        dir.join("out.csv").display()
+      ),
+      "SET datafusion.execution.batch_size = 1".to_string(),
+      "CREATE VIEW v AS SELECT 1 AS a".to_string(),
+      "INSERT INTO test.\"table\" VALUES (4, 40)".to_string(),
+    ]
+  }
+
+  /// Nothing a refused statement could have done is left behind.
+  async fn assert_untouched(engine: &SqlEngine, dir: &std::path::Path, batch_size: usize) {
+    let ctx = engine.session_ctx();
+    assert!(!ctx.table_exist("leak").unwrap());
+    assert!(!ctx.table_exist("v").unwrap());
+    assert!(!dir.join("out.csv").exists());
+    assert_eq!(ctx.copied_config().batch_size(), batch_size);
+    let rows: usize = ctx
+      .sql("SELECT * FROM test.\"table\"")
+      .await
+      .unwrap()
+      .collect()
+      .await
+      .unwrap()
+      .iter()
+      .map(|b| b.num_rows())
+      .sum();
+    assert_eq!(rows, 3);
+  }
+
+  #[tokio::test]
+  async fn test_query_paths_refuse_ddl_dml_and_statements() {
+    let engine = create_test_engine().await;
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("secret.csv");
+    std::fs::write(&secret, "secret\n").unwrap();
+    let batch_size = engine.session_ctx().copied_config().batch_size();
+
+    for sql in refused_statements(dir.path(), &secret) {
+      let cmd = CommandStatementQuery {
+        query: sql.clone(),
+        transaction_id: None,
+      };
+      assert!(
+        engine.execute_statement_query(&cmd).await.is_err(),
+        "statement query ran: {sql}"
+      );
+
+      let forged = TicketStatementQuery {
+        statement_handle: Bytes::from(sql.clone()),
+      };
+      if let Ok((_, mut stream)) = engine.get_statement_query_data_stream(&forged).await {
+        use futures::StreamExt;
+        while let Some(batch) = stream.next().await {
+          assert!(batch.is_err(), "forged ticket ran: {sql}");
+        }
+        panic!("forged ticket planned: {sql}");
+      }
+
+      // A prepared INSERT is legitimate: it runs through the update path, not as a query.
+      if !sql.starts_with("INSERT") {
+        let request = ActionCreatePreparedStatementRequest {
+          query: sql.clone(),
+          transaction_id: None,
+        };
+        assert!(
+          engine.create_prepared_statement(&request).await.is_err(),
+          "prepared statement created: {sql}"
+        );
+      }
+    }
+
+    assert_untouched(&engine, dir.path(), batch_size).await;
+  }
+
+  #[tokio::test]
+  async fn test_update_path_refuses_external_tables_copy_and_set() {
+    let engine = create_test_engine().await;
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("secret.csv");
+    std::fs::write(&secret, "secret\n").unwrap();
+    let batch_size = engine.session_ctx().copied_config().batch_size();
+
+    for sql in refused_statements(dir.path(), &secret)
+      .into_iter()
+      .filter(|sql| !sql.starts_with("CREATE VIEW") && !sql.starts_with("INSERT"))
+    {
+      let cmd = CommandStatementUpdate {
+        query: sql.clone(),
+        transaction_id: None,
+      };
+      assert!(
+        engine.execute_statement_update(&cmd).await.is_err(),
+        "update ran: {sql}"
+      );
+    }
+
+    assert_untouched(&engine, dir.path(), batch_size).await;
+  }
+
+  #[tokio::test]
+  async fn test_query_paths_still_run_select() {
+    use futures::StreamExt;
+
+    let engine = create_test_engine().await;
+    let sql = "SELECT id FROM test.\"table\" ORDER BY id";
+    let cmd = CommandStatementQuery {
+      query: sql.to_string(),
+      transaction_id: None,
+    };
+    let result = engine.execute_statement_query(&cmd).await.unwrap();
+    let ticket = TicketStatementQuery {
+      statement_handle: result.handle,
+    };
+    let (_, mut stream) = engine
+      .get_statement_query_data_stream(&ticket)
+      .await
+      .unwrap();
+    let mut rows = 0;
+    while let Some(batch) = stream.next().await {
+      rows += batch.unwrap().num_rows();
+    }
+    assert_eq!(rows, 3);
+
+    let request = ActionCreatePreparedStatementRequest {
+      query: sql.to_string(),
+      transaction_id: None,
+    };
+    let prepared = engine.create_prepared_statement(&request).await.unwrap();
+    let (_, batches) = engine
+      .get_prepared_statement_data(&prepared.handle)
+      .await
+      .unwrap();
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+  }
+
+  #[tokio::test]
+  async fn test_restricted_state_cannot_read_files_with_permissive_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("secret.csv");
+    std::fs::write(&secret, "secret\n").unwrap();
+    let ctx = SessionContext::new_with_state(restricted_session_state(SessionConfig::new()));
+
+    let created = ctx
+      .sql(&format!(
+        "CREATE EXTERNAL TABLE leak (l VARCHAR) STORED AS CSV LOCATION '{}'",
+        secret.display()
+      ))
+      .await;
+    assert!(created.is_err(), "external table created");
+
+    let copied = match ctx
+      .sql(&format!(
+        "COPY (SELECT 1 AS a) TO '{}' STORED AS CSV",
+        dir.path().join("out.csv").display()
+      ))
+      .await
+    {
+      Ok(df) => df.collect().await.map(|_| ()),
+      Err(e) => Err(e),
+    };
+    assert!(copied.is_err(), "copy wrote a file");
+    assert!(!dir.path().join("out.csv").exists());
+
+    let selected = ctx.sql("SELECT 1 + 1 AS n").await.unwrap().collect().await;
+    assert!(selected.is_ok());
   }
 
   #[tokio::test]
