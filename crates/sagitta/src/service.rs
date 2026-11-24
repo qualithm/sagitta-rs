@@ -331,8 +331,6 @@ impl SagittaService {
   /// - `store` — write incoming data to a store path
   ///   (`exchange/store/<segment1>/<segment2>/...`). Returns a single-row
   ///   batch with a `rows_written: i64` column.
-  /// - `query` — execute a SQL query supplied in `app_metadata` of the first
-  ///   message and stream back results.
   #[allow(clippy::result_large_err)]
   async fn do_exchange_inner<S>(&self, stream: S) -> Result<Vec<FlightData>, Status>
   where
@@ -498,52 +496,6 @@ impl SagittaService {
           .try_collect()
           .await
           .map_err(|e| Status::internal(format!("failed to encode result: {e}")))?;
-
-        Ok(flight_data)
-      }
-      "query" => {
-        // Query mode: execute SQL sent in the first message body and return results.
-        //
-        // The client sends a single FlightData whose `app_metadata` contains the
-        // SQL query as UTF-8. Results are streamed back as FlightData.
-        info!(path = %path.display(), "query exchange");
-
-        let sql = std::str::from_utf8(&first.app_metadata)
-          .map_err(|_| {
-            Status::invalid_argument("query exchange: app_metadata must be valid UTF-8 SQL")
-          })?
-          .trim()
-          .to_string();
-
-        if sql.is_empty() {
-          return Err(Status::invalid_argument(
-            "query exchange: app_metadata must contain a SQL query",
-          ));
-        }
-
-        debug!(sql = %sql, "query exchange: executing SQL");
-
-        let ctx = self.sql_engine.session_ctx();
-        let df = ctx
-          .sql(&sql)
-          .await
-          .map_err(|e| Status::invalid_argument(format!("invalid SQL: {e}")))?;
-
-        let schema = df.schema().inner().clone();
-        let batches = df
-          .collect()
-          .await
-          .map_err(|e| Status::internal(format!("query execution failed: {e}")))?;
-
-        info!(sql = %sql, batch_count = batches.len(), "query exchange: results ready");
-
-        let batch_stream = futures::stream::iter(batches.into_iter().map(Ok::<_, FlightError>));
-        let flight_data: Vec<FlightData> = FlightDataEncoderBuilder::new()
-          .with_schema(schema)
-          .build(batch_stream)
-          .try_collect()
-          .await
-          .map_err(|e| Status::internal(format!("failed to encode results: {e}")))?;
 
         Ok(flight_data)
       }
@@ -4393,50 +4345,45 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_do_exchange_query_mode() {
+  async fn test_do_exchange_query_mode_is_refused() {
     use crate::MemoryStore;
-    use arrow_array::Int64Array;
     use arrow_flight::{FlightData, encode::FlightDataEncoderBuilder, error::FlightError};
     use arrow_schema::{DataType, Field, Schema};
     use futures::StreamExt;
 
-    // Seed the store with test data
-    let store = Arc::new(MemoryStore::new());
-    let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
-    let batch = arrow_array::RecordBatch::try_new(
-      schema.clone(),
-      vec![Arc::new(Int64Array::from(vec![1i64, 2, 3]))],
-    )
-    .unwrap();
-    store
-      .put(DataPath::from(vec!["nums"]), schema.clone(), vec![batch])
-      .await
-      .unwrap();
+    let service = SagittaService::new(Arc::new(MemoryStore::new())).await;
+    let secret = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(secret.path(), "secret\n").unwrap();
 
-    let service = SagittaService::new(store).await;
-
-    // Send query in app_metadata of first message
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
     let descriptor = FlightDescriptor::new_path(vec!["exchange".to_string(), "query".to_string()]);
-
     let empty_stream = futures::stream::empty::<Result<arrow_array::RecordBatch, FlightError>>();
     let mut flight_data_vec: Vec<FlightData> = FlightDataEncoderBuilder::new()
-      .with_schema(schema.clone())
+      .with_schema(schema)
       .with_flight_descriptor(Some(descriptor))
       .build(empty_stream)
       .map(|r| r.unwrap())
       .collect()
       .await;
-
-    // Set app_metadata on first message to contain the SQL query
     if let Some(first) = flight_data_vec.first_mut() {
-      first.app_metadata = bytes::Bytes::from("SELECT COUNT(*) AS cnt FROM nums");
+      first.app_metadata = bytes::Bytes::from(format!(
+        "CREATE EXTERNAL TABLE leak (l VARCHAR) STORED AS CSV LOCATION '{}'",
+        secret.path().display()
+      ));
     }
 
     let stream = futures::stream::iter(flight_data_vec.into_iter().map(Ok));
-    let result = service.do_exchange_inner(stream).await.unwrap();
+    let err = service.do_exchange_inner(stream).await.unwrap_err();
 
-    // Should return result batch
-    assert!(!result.is_empty());
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err.message().contains("unknown exchange mode"), "{err}");
+    assert!(
+      !service
+        .sql_engine
+        .session_ctx()
+        .table_exist("leak")
+        .unwrap()
+    );
   }
 
   #[tokio::test]
