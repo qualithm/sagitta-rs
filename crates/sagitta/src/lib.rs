@@ -31,7 +31,7 @@ pub use interceptor::{
 pub use memory::MemoryStore;
 pub use server::Sagitta;
 pub use service::{CustomAction, SagittaService};
-pub use sql::{SqlError, SqlResult};
+pub use sql::{SqlError, SqlResult, read_only_sql_options, restricted_session_state};
 pub use store::{Dataset, Store};
 pub use types::{DataPath, FlightDescriptorExt};
 
