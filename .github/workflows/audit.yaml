@@ -16,9 +16,9 @@ on:
       - "Cargo.lock"
       - "deny.toml"
       - ".github/workflows/audit.yaml"
-  # A dependency change runs the advisory scan alone before it merges; it files no issue.
+  # A dependency change runs the advisory scan and cargo-deny's licence, ban and
+  # source checks before it merges, into any branch; it files no issue.
   pull_request:
-    branches: [development, main]
     paths:
       - "**/Cargo.toml"
       - "Cargo.lock"
@@ -106,13 +106,12 @@ jobs:
   deny:
     name: Dependency Audit (cargo-deny)
     # Weekly: what it checks changes only with the code or dependencies.
-    if:
-      github.event_name != 'pull_request' && (github.event_name != 'schedule' ||
-      github.event.schedule == '0 6 * * 1')
+    if: github.event_name != 'schedule' || github.event.schedule == '0 6 * * 1'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Create app token for pm issue filing
+        if: github.event_name != 'pull_request'
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -121,19 +120,23 @@ jobs:
           owner: qualithm
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # A pull request checks what it can change; the advisory job covers advisories.
       - name: cargo-deny
         id: scan
         continue-on-error: true
         uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
+        with:
+          command-arguments:
+            ${{ github.event_name == 'pull_request' && 'licenses bans sources' || '' }}
       - name: Report failure
-        if: steps.scan.outcome == 'failure'
+        if: github.event_name != 'pull_request' && (steps.scan.outcome == 'failure')
         uses: ./.github/actions/report-scan-failure
         with:
           mode: report
           title: "${{ github.event.repository.name }}: cargo-deny flagged a policy violation"
           github-token: ${{ steps.app-token.outputs.token }}
       - name: Resolve stale failure issue
-        if: steps.scan.outcome == 'success'
+        if: github.event_name != 'pull_request' && (steps.scan.outcome == 'success')
         uses: ./.github/actions/report-scan-failure
         with:
           mode: resolve
