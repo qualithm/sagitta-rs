@@ -2,6 +2,11 @@
   "version": 1,
   "commands": [
     {
+      "run": "bash .claude/checks/images.sh",
+      "timeout": "10m",
+      "dir": "."
+    },
+    {
       "run": "cargo fmt --all -- --check",
       "timeout": "10m",
       "dir": "."
