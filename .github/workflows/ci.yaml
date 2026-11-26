@@ -485,8 +485,16 @@ jobs:
           restore-keys: |
             benchmark-baseline-${{ runner.os }}
       - name: Run benchmarks and compare against baseline
+        # `shell: bash` adds pipefail, so a failing `cargo bench` fails the step
+        # instead of passing on tee's exit status (qualithm/pm#4848).
+        shell: bash
         run: |
-          cargo bench --workspace --bench '*' -- --baseline main 2>&1 | tee benchmark-comparison.txt
+          # An evicted cache leaves no baseline: say so, and let --baseline-lenient
+          # benchmark without comparing rather than erroring on the missing baseline.
+          if ! find target/criterion -path '*/main/estimates.json' -print -quit 2>/dev/null | grep -q .; then
+            echo "::warning::No benchmark baseline from main was restored, so nothing was compared. The Benchmark Baseline job saves one on the next push to main."
+          fi
+          cargo bench --workspace --bench '*' -- --baseline-lenient main 2>&1 | tee benchmark-comparison.txt
           if grep -E "Performance has regressed" benchmark-comparison.txt; then
             echo "::warning::Performance regression detected - review benchmark results"
           fi
@@ -529,9 +537,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: benchmark-results
-          path: |
-            target/criterion
-            benchmarks/report-*.md
+          path: target/criterion
           retention-days: 30
 
   # Runs only when a job failed or was cancelled, and fails then. On a green
